@@ -1,0 +1,130 @@
+[
+  {
+    "page": 1,
+    "data": {
+      "invoice": {
+        "invoice_type": "VAT_INVOICE",
+        "invoice_number": "00006425",
+        "series": "1C26TTA",
+        "invoice_date": "2026-08-03",
+        "tax_authority_code": null,
+        "currency": null,
+        "payment_method": "TM/CK"
+      },
+      "seller": {
+        "name": "CÔNG TY CỔ PHẦN TÔN ĐÔNG Á",
+        "english_name": "TON DONG A CORPORATION",
+        "tax_code": "3700255880",
+        "address": "Số 5, Đường số 5, KCN Sóng Thần 1, Phường Dĩ An, Thành phố Hồ Chí Minh, Việt Nam",
+        "phone": [
+          "(84-274) 3732575",
+          "(84-28) 38442746"
+        ],
+        "fax": [
+          "(84-274) 3790420",
+          "(84-28) 38477143"
+        ],
+        "email": "info@tondonga.com.vn",
+        "website": "www.tondonga.com.vn"
+      },
+      "buyer": {
+        "name": null,
+        "company_name": "Công Ty TNHH Thương Mại Sản Xuất Dịch Vụ Cơ Khí Tân Tân Thành",
+        "tax_code": "1100515572",
+        "address": "Số 135 Lô 2, Ấp 1 Mỹ Yên, Xã Mỹ Yên, Tỉnh Tây Ninh, Việt Nam",
+        "id_card": null,
+        "passport_number": null,
+        "account_number": null,
+        "budgetary_unit_code": null
+      },
+      "shipping": {
+        "ship_from_warehouse": "Lô D9, Đường số 4, Khu Công nghiệp Nhựt Chánh, Xã Bình Đức, Tỉnh Tây Ninh"
+      },
+      "items": [
+        {
+          "line_number": 1,
+          "description": "Thép hộp mạ kẽm 1.400 30*60*6000",
+          "unit": "Kg",
+          "quantity": 522,
+          "unit_price": 17336.364,
+          "amount": 9049582
+        },
+        {
+          "line_number": 2,
+          "description": "Thép hộp mạ kẽm 1.400 40*80*6000",
+          "unit": "Kg",
+          "quantity": 1407,
+          "unit_price": 17336.3639,
+          "amount": 24392264
+        },
+        {
+          "line_number": 3,
+          "description": "Thép hộp mạ kẽm 1.400 50*100*6000",
+          "unit": "Kg",
+          "quantity": 715,
+          "unit_price": 17336.3636,
+          "amount": 12395500
+        },
+        {
+          "line_number": 4,
+          "description": "Thép hộp mạ kẽm 1.800 50*100*6000",
+          "unit": "Kg",
+          "quantity": 924,
+          "unit_price": 17336.3636,
+          "amount": 16018800
+        },
+        {
+          "line_number": 5,
+          "description": "Thép hộp mạ kẽm 1.400 20*40*6000",
+          "unit": "Kg",
+          "quantity": 671,
+          "unit_price": 17336.3636,
+          "amount": 11632700
+        },
+        {
+          "line_number": 6,
+          "description": "Thép hộp mạ kẽm 1.800 30*60*6000",
+          "unit": "Kg",
+          "quantity": 671,
+          "unit_price": 17336.3636,
+          "amount": 11632700
+        },
+        {
+          "line_number": 7,
+          "description": "Thép hộp mạ kẽm 1.400 30*30*6000",
+          "unit": "Kg",
+          "quantity": 695,
+          "unit_price": 17336.364,
+          "amount": 12048773
+        },
+        {
+          "line_number": 8,
+          "description": "Thép hộp mạ kẽm 1.200 20*20*6000",
+          "unit": "Kg",
+          "quantity": 373,
+          "unit_price": 17336.3646,
+          "amount": 6466464
+        }
+      ],
+      "totals": {
+        "subtotal": 103636783,
+        "vat_rate": 10,
+        "vat_amount": 10363678,
+        "total_payment": 114000461,
+        "amount_in_words": "Một trăm mười bốn triệu bốn trăm sáu mươi mốt đồng"
+      },
+      "signature": {
+        "is_valid": true,
+        "signed_by": "CÔNG TY CỔ PHẦN TÔN ĐÔNG Á",
+        "signed_date": null
+      },
+      "metadata": {
+        "source_type": "PDF",
+        "page_count": 1,
+        "ocr_processed": true,
+        "pdf_text_layer_used": true,
+        "page_image_path": "D:\\Invoice_Scanner\\4f30c1ad-c130-47a0-b164-41ad070218f2_images\\4f30c1ad-c130-47a0-b164-41ad070218f2_page_01.jpg"
+      }
+    }
+  }
+]

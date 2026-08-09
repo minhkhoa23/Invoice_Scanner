@@ -1,43 +1,40 @@
 # Invoice_Scanner
 
-## Pipeline GGUF local CPU
+Pipeline chính nằm toàn bộ trong `OCR_invoice_GGUF_local.ipynb`.
 
-Pipeline mới nằm ở `ocr_invoice_gguf_local.py` và notebook ví dụ nằm ở
-`OCR_invoice_GGUF_local.ipynb`.
+## Cách chạy
 
-Cài dependency:
+1. Mở notebook và chạy cell `Tải mmproj và mở server`. Cell này tải file
+   `mmproj-Vintern-1B-v3_5-Q8_0.gguf` vào thư mục `models/` và in ra command
+   server.
 
-```bash
-pip install --prefer-binary -r requirements-gguf-local.txt
+2. Mở terminal riêng, copy command được notebook in ra, ví dụ:
+
+```powershell
+llama-server -hf rootonchair/Vintern-1B-v3_5-GGUF-ext:Q4_K_M --mmproj "D:/Invoice_Scanner/models/mmproj-Vintern-1B-v3_5-Q8_0.gguf" --chat-template vicuna --port 8081
 ```
 
-`--input` nhận được cả ảnh và PDF. Nếu input là PDF, option
-`--save-pdf-images` sẽ render từng trang thành ảnh trong thư mục
-`<ten-file-pdf>_images` trước khi OCR.
+Giữ terminal server đó mở.
 
-Chạy với PDF mẫu:
+Nếu server báo không tìm thấy `mmproj`, kiểm tra file:
 
-```bash
-python ocr_invoice_gguf_local.py --input "4f30c1ad-c130-47a0-b164-41ad070218f2.pdf" --output "invoice.gguf.json" --save-pdf-images
+```powershell
+Test-Path "D:\Invoice_Scanner\models\mmproj-Vintern-1B-v3_5-Q8_0.gguf"
 ```
 
-Chạy với ảnh:
+Nếu trả `False`, chạy lại cell `Tải mmproj và mở server` trong notebook.
 
-```bash
-python ocr_invoice_gguf_local.py --input "invoice.jpg" --output "invoice.gguf.json"
+3. Đổi biến `INPUT_PATH` thành ảnh hoặc PDF:
+
+```python
+INPUT_PATH = Path("D:/Invoice_Scanner/invoice.pdf")
 ```
 
-Mặc định pipeline dùng `rootonchair/Vintern-1B-v3_5-GGUF-ext` quant `Q4_K_M`
-và ép `n_gpu_layers=0` để chạy CPU-only. Có thể đổi sang `Q4_K_S` hoặc
-`IQ4_XS` nếu muốn nhẹ hơn:
+4. Chạy notebook từ trên xuống.
 
-```bash
-python ocr_invoice_gguf_local.py --input "invoice.pdf" --quant Q4_K_S
-```
+Notebook sẽ:
 
-Nếu Windows vẫn tải file `.tar.gz` và build `llama-cpp-python` từ source,
-hãy cài riêng wheel CPU dựng sẵn:
-
-```bash
-pip install --prefer-binary --only-binary llama-cpp-python llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-```
+- Nhận input là ảnh hoặc PDF.
+- Nếu là PDF, render từng trang thành ảnh trong thư mục `*_images`.
+- Gửi ảnh vào Vintern GGUF qua `llama.cpp server`.
+- Lưu output JSON theo schema demo vào file `.vintern_gguf.json`.

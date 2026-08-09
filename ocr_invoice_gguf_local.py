@@ -5,8 +5,10 @@ Examples:
     python ocr_invoice_gguf_local.py --input "invoice.pdf" --output "invoice.json"
     python ocr_invoice_gguf_local.py --input "invoice.jpg" --output "invoice.json"
 
-The first run downloads the selected GGUF file from Hugging Face. Inference is
-CPU-only by default via n_gpu_layers=0, so it can run without a discrete GPU.
+The default CLI backend uses llama.cpp server, which is more reliable on
+Windows than depending on llama-cpp-python multimodal wheels:
+    llama-server -hf rootonchair/Vintern-1B-v3_5-GGUF-ext:Q4_K_M
+    python ocr_invoice_gguf_local.py --backend server --input "invoice.pdf"
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import importlib.metadata
 import json
 import os
 import re
@@ -23,6 +26,13 @@ from typing import Any
 
 
 MODEL_REPO_ID = "rootonchair/Vintern-1B-v3_5-GGUF-ext"
+MIN_LLAMA_CPP_VERSION = "0.3.10"
+LLAMA_CPP_UPGRADE_COMMAND = (
+    "pip install --upgrade --force-reinstall --prefer-binary "
+    "--only-binary llama-cpp-python "
+    f"\"llama-cpp-python>={MIN_LLAMA_CPP_VERSION}\" "
+    "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu"
+)
 
 QUANT_FILES = {
     "Q2_K": "Vintern-1B-v3_5-Q2_K.gguf",
@@ -72,6 +82,64 @@ def require_pymupdf() -> Any:
         ) from error
 
     return fitz
+
+
+def require_requests() -> Any:
+    try:
+        import requests
+    except ImportError as error:  # pragma: no cover - helper message for users
+        raise SystemExit(
+            "Missing dependency: requests. Install with:\n"
+            "  pip install -r requirements-gguf-local.txt"
+        ) from error
+
+    return requests
+
+
+def get_llama_cpp_diagnostics() -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "version": None,
+        "chat_formats": [],
+    }
+
+    try:
+        diagnostics["version"] = importlib.metadata.version("llama-cpp-python")
+    except importlib.metadata.PackageNotFoundError:
+        diagnostics["version"] = None
+
+    try:
+        from llama_cpp import llama_chat_format
+    except ImportError:
+        return diagnostics
+
+    for name in dir(llama_chat_format):
+        value = getattr(llama_chat_format, name)
+        handlers = getattr(value, "_chat_handlers", None)
+        if isinstance(handlers, dict):
+            diagnostics["chat_formats"] = sorted(handlers)
+            break
+
+    return diagnostics
+
+
+def require_chat_format(chat_format: str | None) -> None:
+    if not chat_format:
+        return
+
+    diagnostics = get_llama_cpp_diagnostics()
+    chat_formats = diagnostics["chat_formats"]
+
+    if chat_formats and chat_format not in chat_formats:
+        raise RuntimeError(
+            "Installed llama-cpp-python does not support "
+            f"chat_format='{chat_format}'.\n"
+            f"Current version: {diagnostics['version']}\n"
+            f"Available chat formats: {chat_formats}\n\n"
+            "This GGUF vision pipeline needs the mtmd multimodal handler. "
+            "Run this in the same notebook/kernel environment, then restart "
+            "the kernel and reload the model:\n"
+            f"  {LLAMA_CPP_UPGRADE_COMMAND}"
+        )
 
 
 INVOICE_JSON_SCHEMA = {
@@ -173,6 +241,7 @@ def load_llm(
     filename: str | None = None,
     n_ctx: int = 8192,
     n_threads: int | None = None,
+    chat_format: str | None = "mtmd",
     verbose: bool = False,
 ) -> Any:
     """
@@ -185,19 +254,36 @@ def load_llm(
     except ImportError as error:  # pragma: no cover - helper message for users
         raise SystemExit(
             "Missing dependency: llama-cpp-python. Install with:\n"
-            "  pip install -r requirements-gguf-local.txt"
+            "  pip install -r requirements-llama-cpp-python.txt"
         ) from error
 
     model_filename = get_quant_filename(quant=quant, filename=filename)
 
-    return Llama.from_pretrained(
-        repo_id=repo_id,
-        filename=model_filename,
-        n_ctx=n_ctx,
-        n_threads=n_threads or max(1, (os.cpu_count() or 4) - 1),
-        n_gpu_layers=0,
-        verbose=verbose,
-    )
+    load_kwargs: dict[str, Any] = {
+        "repo_id": repo_id,
+        "filename": model_filename,
+        "n_ctx": n_ctx,
+        "n_threads": n_threads or max(1, (os.cpu_count() or 4) - 1),
+        "n_gpu_layers": 0,
+        "verbose": verbose,
+    }
+
+    if chat_format:
+        require_chat_format(chat_format)
+        load_kwargs["chat_format"] = chat_format
+
+    try:
+        return Llama.from_pretrained(**load_kwargs)
+    except Exception as error:
+        if chat_format == "mtmd":
+            raise SystemExit(
+                "Could not load llama-cpp-python with chat_format='mtmd'. "
+                "This model needs the mtmd multimodal chat handler for images.\n"
+                "Try upgrading llama-cpp-python and restarting the kernel:\n"
+                f"  {LLAMA_CPP_UPGRADE_COMMAND}"
+            ) from error
+
+        raise
 
 
 def normalize_image(
@@ -461,6 +547,87 @@ def response_to_text(response: Any) -> str:
     return str(response)
 
 
+def normalize_server_url(server_url: str) -> str:
+    server_url = server_url.rstrip("/")
+
+    if server_url.endswith("/v1"):
+        return server_url
+
+    return f"{server_url}/v1"
+
+
+def get_server_origin(server_url: str) -> str:
+    server_url = server_url.rstrip("/")
+
+    if server_url.endswith("/v1"):
+        return server_url[:-3].rstrip("/")
+
+    return server_url
+
+
+def get_chat_completion_urls(server_url: str) -> list[str]:
+    origin = get_server_origin(server_url)
+    base_url = normalize_server_url(server_url)
+
+    urls = [
+        f"{base_url}/chat/completions",
+        f"{origin}/chat/completions",
+    ]
+
+    return list(dict.fromkeys(urls))
+
+
+def probe_llama_server(
+    server_url: str = "http://127.0.0.1:8080/v1",
+    timeout: int = 10,
+) -> list[dict[str, Any]]:
+    requests = require_requests()
+    origin = get_server_origin(server_url)
+    base_url = normalize_server_url(server_url)
+
+    urls = [
+        origin,
+        f"{base_url}/models",
+        f"{origin}/v1/models",
+        f"{origin}/props",
+        f"{origin}/health",
+    ]
+
+    results: list[dict[str, Any]] = []
+
+    for url in list(dict.fromkeys(urls)):
+        try:
+            response = requests.get(url, timeout=timeout)
+            content_type = response.headers.get("content-type", "")
+            body = response.text[:500]
+            if "application/json" in content_type:
+                try:
+                    body = json.dumps(
+                        response.json(),
+                        ensure_ascii=False,
+                    )[:500]
+                except ValueError:
+                    pass
+
+            results.append(
+                {
+                    "url": url,
+                    "status_code": response.status_code,
+                    "content_type": content_type,
+                    "body": body,
+                }
+            )
+        except requests.RequestException as error:
+            results.append(
+                {
+                    "url": url,
+                    "error": str(error),
+                }
+            )
+
+    return results
+
+
 def run_vintern_gguf(
     llm: Any,
     image: Any,
@@ -476,8 +643,73 @@ def run_vintern_gguf(
         jpeg_quality=jpeg_quality,
     )
 
-    response = llm.create_chat_completion(
-        messages=[
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url,
+                    },
+                },
+            ],
+        }
+    ]
+
+    try:
+        response = llm.create_chat_completion(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    except Exception as error:
+        error_text = str(error)
+        if "can only concatenate str" in error_text and "list" in error_text:
+            raise RuntimeError(
+                "llama-cpp-python is using a text-only chat template, so it "
+                "cannot receive an image message. Reload the model with "
+                "load_llm(chat_format='mtmd'), then rerun this cell."
+            ) from error
+
+        if "Invalid chat handler: mtmd" in error_text:
+            raise RuntimeError(
+                "Your installed llama-cpp-python does not have the mtmd "
+                "multimodal handler. Run this in the same notebook/kernel "
+                "environment, restart the kernel, then reload llm:\n"
+                f"  {LLAMA_CPP_UPGRADE_COMMAND}"
+            ) from error
+
+        raise
+
+    return response_to_text(response)
+
+
+def run_vintern_server(
+    image: Any,
+    prompt: str = INVOICE_PROMPT,
+    server_url: str = "http://127.0.0.1:8080/v1",
+    model: str = "local-model",
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_image_side: int = 1800,
+    jpeg_quality: int = 92,
+    timeout: int = 600,
+) -> str:
+    requests = require_requests()
+
+    image_url = image_to_data_uri(
+        image=image,
+        max_side=max_image_side,
+        jpeg_quality=jpeg_quality,
+    )
+    payload = {
+        "model": model,
+        "messages": [
             {
                 "role": "user",
                 "content": [
@@ -494,11 +726,55 @@ def run_vintern_gguf(
                 ],
             }
         ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
 
-    return response_to_text(response)
+    urls = get_chat_completion_urls(server_url)
+    not_found_errors: list[str] = []
+    last_response_text = ""
+
+    for url in urls:
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.RequestException as error:
+            raise RuntimeError(
+                "Cannot connect to llama.cpp server. Start it in another terminal:\n"
+                "  llama-server -hf rootonchair/Vintern-1B-v3_5-GGUF-ext:Q4_K_M\n\n"
+                f"Server URL used by the pipeline: {server_url}"
+            ) from error
+
+        last_response_text = response.text
+
+        if response.status_code == 404:
+            not_found_errors.append(f"{url} -> HTTP 404")
+            continue
+
+        if not response.ok:
+            raise RuntimeError(
+                "llama.cpp server returned an error:\n"
+                f"URL: {url}\n"
+                f"HTTP {response.status_code}\n{response.text}"
+            )
+
+        return response_to_text(response.json())
+
+    raise RuntimeError(
+        "The server is reachable, but no OpenAI-compatible chat endpoint was found.\n"
+        f"Tried: {not_found_errors}\n\n"
+        "Check that the terminal is running `llama-server`, not `llama-cli`, "
+        "and that no other app is using port 8080. A recent llama.cpp server "
+        "should respond at:\n"
+        "  http://127.0.0.1:8080/v1/models\n"
+        "  http://127.0.0.1:8080/v1/chat/completions\n\n"
+        "In the notebook, run `probe_llama_server(SERVER_URL)` to inspect what "
+        "is actually listening on that port.\n\n"
+        f"Last response body:\n{last_response_text[:1000]}"
+    )
 
 
 def scan_invoice_file(
@@ -564,6 +840,73 @@ def scan_invoice_file(
     return results
 
 
+def scan_invoice_file_server(
+    input_path: str | Path,
+    prompt: str = INVOICE_PROMPT,
+    server_url: str = "http://127.0.0.1:8080/v1",
+    model: str = "local-model",
+    pdf_dpi: int = 200,
+    save_pdf_images: bool = False,
+    pdf_image_dir: str | Path | None = None,
+    pdf_image_format: str = "jpg",
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_image_side: int = 1800,
+    jpeg_quality: int = 92,
+    timeout: int = 600,
+) -> list[dict[str, Any]]:
+    images, source_type, image_paths = load_input_images_with_paths(
+        input_path=input_path,
+        pdf_dpi=pdf_dpi,
+        save_pdf_images=save_pdf_images,
+        pdf_image_dir=pdf_image_dir,
+        pdf_image_format=pdf_image_format,
+        jpeg_quality=jpeg_quality,
+    )
+    results: list[dict[str, Any]] = []
+
+    for page_index, image in enumerate(images, start=1):
+        print(f"Processing page {page_index}/{len(images)} via llama.cpp server...")
+
+        raw_response = run_vintern_server(
+            image=image,
+            prompt=prompt,
+            server_url=server_url,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_image_side=max_image_side,
+            jpeg_quality=jpeg_quality,
+            timeout=timeout,
+        )
+
+        page_data = parse_model_json(raw_response)
+        if not isinstance(page_data.get("metadata"), dict):
+            page_data["metadata"] = {}
+
+        page_data["metadata"].update(
+            {
+                "source_type": source_type,
+                "page_count": len(images),
+                "ocr_processed": True,
+            }
+        )
+
+        page_image_path = image_paths[page_index - 1]
+        if page_image_path:
+            page_data["metadata"]["page_image_path"] = str(page_image_path)
+
+        results.append(
+            {
+                "page": page_index,
+                "data": page_data,
+                "raw_response": raw_response,
+            }
+        )
+
+    return results
+
+
 def save_results(
     results: list[dict[str, Any]],
     output_path: str | Path,
@@ -591,6 +934,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to an invoice image or PDF.",
     )
     parser.add_argument(
+        "--backend",
+        default="server",
+        choices=["server", "python"],
+        help="Inference backend. Use 'server' for llama.cpp server.",
+    )
+    parser.add_argument(
         "--output",
         help="Output JSON path. Defaults to <input>.json.",
     )
@@ -613,6 +962,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--threads",
         type=int,
         help="CPU threads for llama.cpp. Defaults to CPU count minus one.",
+    )
+    parser.add_argument(
+        "--chat-format",
+        default="mtmd",
+        help="llama-cpp-python chat format. Keep 'mtmd' for multimodal GGUF.",
+    )
+    parser.add_argument(
+        "--server-url",
+        default="http://127.0.0.1:8080/v1",
+        help="OpenAI-compatible llama.cpp server URL.",
+    )
+    parser.add_argument(
+        "--server-model",
+        default="local-model",
+        help="Model name sent to the OpenAI-compatible server.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="HTTP timeout in seconds for server backend.",
     )
     parser.add_argument(
         "--n-ctx",
@@ -686,27 +1056,44 @@ def main() -> None:
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output else input_path.with_suffix(".json")
 
-    llm = load_llm(
-        repo_id=args.repo_id,
-        quant=args.quant,
-        filename=args.filename,
-        n_ctx=args.n_ctx,
-        n_threads=args.threads,
-        verbose=args.verbose,
-    )
+    if args.backend == "python":
+        llm = load_llm(
+            repo_id=args.repo_id,
+            quant=args.quant,
+            filename=args.filename,
+            n_ctx=args.n_ctx,
+            n_threads=args.threads,
+            chat_format=args.chat_format,
+            verbose=args.verbose,
+        )
 
-    results = scan_invoice_file(
-        input_path=input_path,
-        llm=llm,
-        pdf_dpi=args.pdf_dpi,
-        save_pdf_images=args.save_pdf_images,
-        pdf_image_dir=args.pdf_image_dir,
-        pdf_image_format=args.pdf_image_format,
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
-        max_image_side=args.max_image_side,
-        jpeg_quality=args.jpeg_quality,
-    )
+        results = scan_invoice_file(
+            input_path=input_path,
+            llm=llm,
+            pdf_dpi=args.pdf_dpi,
+            save_pdf_images=args.save_pdf_images,
+            pdf_image_dir=args.pdf_image_dir,
+            pdf_image_format=args.pdf_image_format,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            max_image_side=args.max_image_side,
+            jpeg_quality=args.jpeg_quality,
+        )
+    else:
+        results = scan_invoice_file_server(
+            input_path=input_path,
+            server_url=args.server_url,
+            model=args.server_model,
+            pdf_dpi=args.pdf_dpi,
+            save_pdf_images=args.save_pdf_images,
+            pdf_image_dir=args.pdf_image_dir,
+            pdf_image_format=args.pdf_image_format,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            max_image_side=args.max_image_side,
+            jpeg_quality=args.jpeg_quality,
+            timeout=args.timeout,
+        )
 
     save_results(
         results=results,
