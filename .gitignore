@@ -1,1 +1,11 @@
 *.gguf
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+node_modules/
+dist/
+tmp/
+backend/storage/
+frontend/.env
