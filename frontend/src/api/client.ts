@@ -1,8 +1,7 @@
 import axios, { AxiosError, type AxiosProgressEvent } from "axios";
 import type { ExtractResponse, ServerStatus } from "../types/invoice";
 
-export const API_BASE_URL =
-  import.meta.env.VITE_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8000";
+export const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, "") ?? "";
 
 const api = axios.create({
   baseURL: API_BASE_URL,

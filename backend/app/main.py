@@ -10,6 +10,7 @@ from uuid import uuid4
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .pipeline import (
@@ -26,6 +27,9 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 STORAGE_ROOT = BACKEND_ROOT / "storage"
 UPLOAD_ROOT = STORAGE_ROOT / "uploads"
 RESULT_ROOT = STORAGE_ROOT / "results"
+FRONTEND_DIST = Path(
+    os.getenv("FRONTEND_DIST", str(BACKEND_ROOT.parent / "frontend" / "dist"))
+).resolve()
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
 ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
@@ -53,6 +57,13 @@ app.add_middleware(
     allow_headers=["*"],
     max_age=86400,
 )
+
+if (FRONTEND_DIST / "assets").exists():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=FRONTEND_DIST / "assets"),
+        name="frontend-assets",
+    )
 
 
 @app.on_event("startup")
@@ -169,3 +180,19 @@ def get_result(job_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Không tìm thấy kết quả OCR.")
     with result_path.open("r", encoding="utf-8") as result_file:
         return json.load(result_file)
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_frontend(full_path: str) -> FileResponse:
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    index_path = FRONTEND_DIST / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend build chưa sẵn sàng.")
+
+    requested_path = (FRONTEND_DIST / full_path).resolve()
+    if requested_path.is_relative_to(FRONTEND_DIST) and requested_path.is_file():
+        return FileResponse(requested_path)
+
+    return FileResponse(index_path)
