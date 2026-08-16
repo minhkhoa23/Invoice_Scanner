@@ -81,10 +81,17 @@ INVOICE_JSON_SCHEMA = {
         {
             "line_number": "number | null",
             "description": "string | null",
+            "description_lines": ["string"],
+            "item_type": "GOODS | SERVICE | FEE | OTHER | null",
+            "container_number": "string | null",
             "unit": "string | null",
             "quantity": "number | null",
             "unit_price": "number | null",
             "amount": "number | null",
+            "taxable_amount": "number | null",
+            "vat_rate": "number | null",
+            "vat_amount": "number | null",
+            "total_amount": "number | null",
         }
     ],
     "totals": {
@@ -120,6 +127,9 @@ Quy tắc bắt buộc:
 - Chuẩn hóa ngày về YYYY-MM-DD nếu có thể.
 - Với số tiền, số lượng, đơn giá: trả về number, bỏ dấu phân cách hàng nghìn.
 - Giữ nguyên tiếng Việt có dấu trong tên công ty, địa chỉ và mô tả hàng hóa.
+- Với bảng hàng hóa/dịch vụ, không bỏ dòng mô tả bị xuống dòng. Gộp vào description và lưu từng dòng gốc trong description_lines.
+- Nếu mô tả có mã container như TGBU8540187 thì lưu vào container_number, vẫn giữ nguyên trong description.
+- Với từng item, amount/taxable_amount là thành tiền trước thuế; vat_rate, vat_amount và total_amount là thuế suất, tiền thuế và tổng tiền thanh toán của riêng dòng đó nếu có.
 - Không tự bịa thông tin không có trên ảnh.
 
 Schema bắt buộc:
@@ -708,13 +718,76 @@ SECTION_FIELD_ALIASES = {
     }
 }
 
+ITEM_FIELD_ALIASES = {
+    "name": "description",
+    "service_name": "description",
+    "goods_name": "description",
+    "product_name": "description",
+    "line_description": "description",
+    "tax_rate": "vat_rate",
+    "tax_percent": "vat_rate",
+    "tax_amount": "vat_amount",
+    "line_tax": "vat_amount",
+    "before_tax_amount": "taxable_amount",
+    "amount_before_tax": "taxable_amount",
+    "line_amount_before_tax": "taxable_amount",
+    "line_total": "total_amount",
+    "total": "total_amount",
+    "payment_amount": "total_amount",
+    "container_no": "container_number",
+    "container_code": "container_number",
+}
+
+ITEM_NUMBER_FIELDS = {
+    "line_number",
+    "quantity",
+    "unit_price",
+    "amount",
+    "taxable_amount",
+    "vat_rate",
+    "vat_amount",
+    "total_amount",
+}
+
+NUMERIC_FIELD_NAMES = ITEM_NUMBER_FIELDS | {
+    "subtotal",
+    "vat_rate",
+    "vat_amount",
+    "total_payment",
+    "page_count",
+}
+
+PLACEHOLDER_TEXT_VALUES = {
+    "-",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "string",
+    "number",
+    "boolean",
+}
+
+
+def is_placeholder_text(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value.strip().lower())
+    return (
+        normalized in PLACEHOLDER_TEXT_VALUES
+        or ("|" in normalized and "null" in normalized)
+    )
+
 
 def normalize_list(value: Any) -> list[Any]:
     if value is None:
         return []
-    if isinstance(value, list):
-        return value
-    return [value]
+    values = value if isinstance(value, list) else [value]
+    normalized_values = []
+    for item in values:
+        if isinstance(item, str):
+            item = clean_text_value(item)
+        if item is not None and item != "":
+            normalized_values.append(item)
+    return normalized_values
 
 
 def normalize_date_value(value: Any) -> Any:
@@ -739,6 +812,8 @@ def apply_section_aliases(section: str, value: Any) -> Any:
 
 def merge_known_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
     for key, value in source.items():
+        if isinstance(value, str):
+            value = clean_text_value(value)
         if key not in target or value is None:
             continue
         if key.endswith("date"):
@@ -749,20 +824,68 @@ def merge_known_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
             target[key] = normalize_list(value)
         elif key == "items" and isinstance(value, list):
             target[key] = [normalize_item(item) for item in value if isinstance(item, dict)]
+        elif key in NUMERIC_FIELD_NAMES:
+            target[key] = parse_vn_percent(value) if key == "vat_rate" else parse_vn_number(value)
         else:
             target[key] = value
 
 
 def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
+    item = dict(item)
+    for alias, canonical in ITEM_FIELD_ALIASES.items():
+        if alias in item and canonical not in item:
+            item[canonical] = item[alias]
+
+    if item.get("taxable_amount") is None and item.get("amount") is not None:
+        item["taxable_amount"] = item["amount"]
+    if item.get("amount") is None and item.get("taxable_amount") is not None:
+        item["amount"] = item["taxable_amount"]
+
     template = {
         "line_number": None,
         "description": None,
+        "description_lines": [],
+        "item_type": None,
+        "container_number": None,
         "unit": None,
         "quantity": None,
         "unit_price": None,
         "amount": None,
+        "taxable_amount": None,
+        "vat_rate": None,
+        "vat_amount": None,
+        "total_amount": None,
     }
     merge_known_fields(template, item)
+
+    description = clean_text_value(template["description"])
+    description_lines = normalize_list(template["description_lines"])
+    description_lines = [
+        clean_text_value(line) for line in description_lines if clean_text_value(line)
+    ]
+    if not description and description_lines:
+        description = clean_text_value(" ".join(str(line) for line in description_lines))
+    if description and not description_lines:
+        description_lines = [description]
+    template["description"] = description
+    template["description_lines"] = description_lines
+
+    if not template["container_number"]:
+        template["container_number"] = extract_container_number(description)
+    if not template["item_type"]:
+        template["item_type"] = infer_item_type(description)
+
+    for field in ITEM_NUMBER_FIELDS:
+        if field == "vat_rate":
+            template[field] = parse_vn_percent(template[field])
+        else:
+            template[field] = parse_vn_number(template[field])
+
+    if template["taxable_amount"] is None and template["amount"] is not None:
+        template["taxable_amount"] = template["amount"]
+    if template["amount"] is None and template["taxable_amount"] is not None:
+        template["amount"] = template["taxable_amount"]
+
     return template
 
 
@@ -808,9 +931,12 @@ def normalize_invoice_data(data: Any) -> dict[str, Any]:
 def clean_text_value(value: Any) -> str | None:
     if value is None:
         return None
-    value = re.sub(r"[ \t]+", " ", str(value))
+    value = str(value).replace("\xa0", " ")
+    value = re.sub(r"[ \t]+", " ", value)
     value = re.sub(r"\s*\n\s*", " ", value)
     value = value.strip(" :-")
+    if is_placeholder_text(value):
+        return None
     return value or None
 
 
@@ -864,6 +990,181 @@ def parse_vn_percent(value: Any) -> Any:
     return parse_vn_number(value.replace("%", ""))
 
 
+def extract_container_number(value: Any) -> str | None:
+    value = clean_text_value(value)
+    if not value:
+        return None
+    match = re.search(r"\b[A-Z]{4}\d{7}\b", value.upper())
+    return match.group(0) if match else None
+
+
+def infer_item_type(description: Any) -> str | None:
+    description = clean_text_value(description)
+    if not description:
+        return None
+    lowered = description.lower()
+    if any(keyword in lowered for keyword in ["phụ phí", "phí", "fee", "surcharge"]):
+        return "FEE"
+    if any(keyword in lowered for keyword in ["dịch vụ", "service"]):
+        return "SERVICE"
+    return "GOODS"
+
+
+def normalized_text_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for line in text.splitlines():
+        normalized = clean_text_value(line.replace("\xa0", " "))
+        if normalized:
+            lines.append(normalized)
+    return lines
+
+
+def compact_table_marker(value: Any) -> str:
+    value = clean_text_value(value) or ""
+    return re.sub(r"\s+", "", value.lower()).replace("×", "x")
+
+
+def is_amount_column_marker(value: Any) -> bool:
+    return compact_table_marker(value) == "6=4x5"
+
+
+def is_post_amount_header_marker(value: Any) -> bool:
+    return compact_table_marker(value) in {"7", "8", "9=6+8"}
+
+
+def is_table_total_boundary(value: Any) -> bool:
+    value = clean_text_value(value) or ""
+    return bool(
+        re.search(
+            r"Cộng tiền hàng|Tổng cộng|Total amount|Số tiền viết bằng chữ|Amount in words",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
+def is_item_line_number(value: Any) -> bool:
+    value = clean_text_value(value) or ""
+    return bool(re.fullmatch(r"\d{1,3}", value))
+
+
+def is_numeric_cell(value: Any) -> bool:
+    value = clean_text_value(value)
+    if not value or "%" in value:
+        return False
+    value = re.sub(r"\b(?:vnd|vnđ|đ)\b", "", value, flags=re.IGNORECASE).strip()
+    return bool(re.fullmatch(r"[-+]?\d+(?:[.,]\d+)*", value))
+
+
+def is_percent_cell(value: Any) -> bool:
+    value = clean_text_value(value) or ""
+    return bool(re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?\s*%", value))
+
+
+def numeric_cells_after_label(lines: list[str], pattern: str, count: int = 3) -> list[Any]:
+    for index, line in enumerate(lines):
+        if not re.search(pattern, line, re.IGNORECASE):
+            continue
+        values = []
+        for following in lines[index + 1 :]:
+            if is_numeric_cell(following):
+                values.append(parse_vn_number(following))
+                if len(values) >= count:
+                    break
+                continue
+            if values:
+                break
+        return values
+    return []
+
+
+def text_after_colon(value: Any) -> str | None:
+    value = clean_text_value(value)
+    if not value or ":" not in value:
+        return None
+    return clean_text_value(value.split(":", 1)[1])
+
+
+def split_contact_values(value: Any) -> list[str]:
+    value = clean_text_value(value)
+    if not value:
+        return []
+    return [item.strip() for item in re.split(r"\s+-\s+", value) if item.strip()]
+
+
+def parse_seller_from_text(text: str) -> dict[str, Any]:
+    lines = normalized_text_lines(text)
+    seller = blank_invoice_json()["seller"]
+
+    tax_line_index = None
+    for index, line in enumerate(lines):
+        if not re.search(r"Mã số thuế\s*\(Tax code\)", line, re.IGNORECASE):
+            continue
+        previous_line = lines[index - 1] if index > 0 else ""
+        if "Tên đơn vị" in previous_line or "Company's name" in previous_line:
+            continue
+        tax_line_index = index
+        seller["tax_code"] = normalize_tax_code(text_after_colon(line))
+        break
+
+    if tax_line_index is None:
+        return seller
+
+    previous_lines = lines[max(0, tax_line_index - 3) : tax_line_index]
+    previous_lines = [
+        line
+        for line in previous_lines
+        if not re.search(r"Điện thoại|ĐT|Tel", line, re.IGNORECASE)
+    ]
+    if previous_lines:
+        english_line = previous_lines[-1]
+        seller["english_name"] = clean_text_value(english_line.strip("() "))
+    if len(previous_lines) >= 2:
+        seller["name"] = clean_text_value(previous_lines[-2])
+
+    for index in range(tax_line_index + 1, len(lines)):
+        if not re.search(r"Địa chỉ\s*\(Address\)", lines[index], re.IGNORECASE):
+            continue
+
+        address_parts = [text_after_colon(lines[index])]
+        for following in lines[index + 1 :]:
+            if re.search(
+                r"^(?:ĐT|Điện thoại|Tài khoản|Mã của cơ quan thuế|Mã CQT|HÓA ĐƠN|Email|Website)\b",
+                following,
+                re.IGNORECASE,
+            ):
+                break
+            address_parts.append(following)
+        seller["address"] = clean_text_value(
+            " ".join(part for part in address_parts if part)
+        )
+        break
+
+    for line in lines:
+        contact_match = re.search(
+            r"(?:ĐT|Điện thoại)\s*\(Tel\):\s*(.*)$",
+            line,
+            re.IGNORECASE,
+        )
+        if not contact_match:
+            continue
+        contact_line = clean_text_value(contact_match.group(1)) or ""
+        phone_part = contact_line.split("Fax:", 1)[0]
+        fax_part = contact_line.split("Fax:", 1)[1] if "Fax:" in contact_line else ""
+        seller["phone"] = split_contact_values(phone_part)
+        seller["fax"] = split_contact_values(fax_part)
+        break
+
+    for line in lines:
+        email_match = re.search(r"Email:\s*(.*?)\s+Website:\s*(.+)$", line, re.IGNORECASE)
+        if email_match:
+            seller["email"] = clean_text_value(email_match.group(1))
+            seller["website"] = clean_text_value(email_match.group(2))
+            break
+
+    return seller
+
+
 def extract_pdf_text_pages(pdf_path: str | Path) -> list[str]:
     document = fitz.open(pdf_path)
     pages = [page.get_text("text") for page in document]
@@ -872,47 +1173,87 @@ def extract_pdf_text_pages(pdf_path: str | Path) -> list[str]:
 
 
 def parse_invoice_items_from_text(text: str) -> list[dict[str, Any]]:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = normalized_text_lines(text)
     start_index = None
     end_index = len(lines)
 
     for index, line in enumerate(lines):
-        if "6 = 4 x 5" in line:
+        if is_amount_column_marker(line):
             start_index = index + 1
             break
 
     if start_index is None:
         return []
 
+    while start_index < len(lines) and is_post_amount_header_marker(lines[start_index]):
+        start_index += 1
+
     for index in range(start_index, len(lines)):
-        if "Cộng tiền hàng" in lines[index] or "Total amount" in lines[index]:
+        if is_table_total_boundary(lines[index]):
             end_index = index
             break
 
     table_lines = lines[start_index:end_index]
-    items = []
+    items: list[dict[str, Any]] = []
     index = 0
-    while index + 5 < len(table_lines):
-        if not re.fullmatch(r"\d+", table_lines[index]):
+    while index < len(table_lines):
+        if not is_item_line_number(table_lines[index]):
             index += 1
             continue
 
-        unit = table_lines[index + 2]
-        if not re.fullmatch(r"[A-Za-zÀ-ỹ/%\.]+", unit):
-            index += 1
-            continue
+        parsed_item = None
+        next_index = index + 1
+        for unit_index in range(index + 2, len(table_lines)):
+            unit = table_lines[unit_index]
+            if is_item_line_number(unit) or is_numeric_cell(unit) or is_percent_cell(unit):
+                continue
+            if unit_index + 3 >= len(table_lines):
+                break
+            if not (
+                is_numeric_cell(table_lines[unit_index + 1])
+                and is_numeric_cell(table_lines[unit_index + 2])
+                and is_numeric_cell(table_lines[unit_index + 3])
+            ):
+                continue
 
-        items.append(
-            {
-                "line_number": int(table_lines[index]),
-                "description": clean_text_value(table_lines[index + 1]),
+            description_lines = table_lines[index + 1 : unit_index]
+            if not description_lines:
+                continue
+
+            amount = parse_vn_number(table_lines[unit_index + 3])
+            parsed_item = {
+                "line_number": int(clean_text_value(table_lines[index]) or 0),
+                "description": clean_text_value(" ".join(description_lines)),
+                "description_lines": description_lines,
                 "unit": clean_text_value(unit),
-                "quantity": parse_vn_number(table_lines[index + 3]),
-                "unit_price": parse_vn_number(table_lines[index + 4]),
-                "amount": parse_vn_number(table_lines[index + 5]),
+                "quantity": parse_vn_number(table_lines[unit_index + 1]),
+                "unit_price": parse_vn_number(table_lines[unit_index + 2]),
+                "amount": amount,
+                "taxable_amount": amount,
             }
-        )
-        index += 6
+            next_index = unit_index + 4
+
+            if (
+                unit_index + 6 < len(table_lines)
+                and is_percent_cell(table_lines[unit_index + 4])
+                and is_numeric_cell(table_lines[unit_index + 5])
+                and is_numeric_cell(table_lines[unit_index + 6])
+            ):
+                parsed_item.update(
+                    {
+                        "vat_rate": parse_vn_percent(table_lines[unit_index + 4]),
+                        "vat_amount": parse_vn_number(table_lines[unit_index + 5]),
+                        "total_amount": parse_vn_number(table_lines[unit_index + 6]),
+                    }
+                )
+                next_index = unit_index + 7
+            break
+
+        if parsed_item:
+            items.append(normalize_item(parsed_item))
+            index = next_index
+        else:
+            index += 1
 
     return items
 
@@ -921,6 +1262,7 @@ def parse_invoice_text_layer(text: str) -> dict[str, Any]:
     data = blank_invoice_json()
     if not clean_text_value(text):
         return data
+    lines = normalized_text_lines(text)
 
     data["invoice"]["invoice_type"] = (
         "VAT_INVOICE"
@@ -931,50 +1273,36 @@ def parse_invoice_text_layer(text: str) -> dict[str, Any]:
         )
         else None
     )
-    data["invoice"]["invoice_number"] = regex_value(r"Số \(No\):[ \t]*([^\n]+)", text)
-    data["invoice"]["series"] = regex_value(r"Ký hiệu \(Series\):[ \t]*([^\n]+)", text)
-    day = regex_value(r"Ngày \(Date\)[ \t]*(\d{1,2})", text)
-    month = regex_value(r"Tháng \(Month\)[ \t]*(\d{1,2})", text)
-    year = regex_value(r"Năm \(Year\)[ \t]*(\d{4})", text)
+    data["invoice"]["invoice_number"] = regex_value(r"Số \(No\.?\):\s*([^\n]+)", text)
+    data["invoice"]["series"] = regex_value(
+        r"Ký hiệu \((?:Series|Serial)\):\s*([^\n]+)",
+        text,
+    )
+    day = regex_value(r"Ngày \(Date\)\s*(\d{1,2})", text)
+    month = regex_value(r"Tháng \(Month\)\s*(\d{1,2})", text)
+    year = regex_value(r"Năm \(Year\)\s*(\d{4})", text)
     if day and month and year:
         data["invoice"]["invoice_date"] = f"{year}-{int(month):02d}-{int(day):02d}"
-    data["invoice"]["tax_authority_code"] = regex_value(
-        r"Mã CQT:[ \t]*([^\n]*)",
+    data["invoice"]["tax_authority_code"] = (
+        regex_value(
+            r"Mã của cơ quan thuế \(Tax authority code\):\s*([A-Z0-9]{10,})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        or regex_value(r"Mã CQT:\s*([A-Z0-9]{10,})", text, flags=re.IGNORECASE)
+    )
+    data["invoice"]["currency"] = regex_value(
+        r"Đơn vị tiền tệ \(Currency\):\s*([^\n]+)",
         text,
         flags=re.IGNORECASE,
     )
     data["invoice"]["payment_method"] = regex_value(
-        r"Hình thức thanh toán \(Method payment\):[ \t]*([^\n]+)",
+        r"Hình thức thanh toán \((?:Method payment|Payment method)\):\s*([^\n]+)",
         text,
         flags=re.IGNORECASE,
     )
 
-    seller_match = re.search(
-        r"(?m)^([^\n:]+)\n([^\n:]+)\nMã số thuế \(Tax code\):\s*([^\n]+)\n"
-        r"Địa chỉ \(Address\):\s*(.*?)\nĐT \(Tel\):\s*(.*?)\nEmail:\s*(.*?)\s+Website:\s*([^\n]+)",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if seller_match:
-        data["seller"].update(
-            {
-                "name": clean_text_value(seller_match.group(1)),
-                "english_name": clean_text_value(seller_match.group(2)),
-                "tax_code": normalize_tax_code(seller_match.group(3)),
-                "address": clean_text_value(seller_match.group(4)),
-                "email": clean_text_value(seller_match.group(6)),
-                "website": clean_text_value(seller_match.group(7)),
-            }
-        )
-        contact_line = clean_text_value(seller_match.group(5)) or ""
-        phone_part = contact_line.split("Fax:", 1)[0]
-        fax_part = contact_line.split("Fax:", 1)[1] if "Fax:" in contact_line else ""
-        data["seller"]["phone"] = [
-            item.strip() for item in re.split(r"\s+-\s+", phone_part) if item.strip()
-        ]
-        data["seller"]["fax"] = [
-            item.strip() for item in re.split(r"\s+-\s+", fax_part) if item.strip()
-        ]
+    merge_known_fields(data["seller"], parse_seller_from_text(text))
 
     data["buyer"]["name"] = regex_value(
         r"Họ tên người mua hàng \(Buyer's name\):[ \t]*([^\n]*)",
@@ -992,7 +1320,9 @@ def parse_invoice_text_layer(text: str) -> dict[str, Any]:
         )
     )
     data["buyer"]["address"] = regex_value(
-        r"Địa chỉ:\s*\(Address\):\s*(.*?)\n\s*Hình thức thanh toán",
+        r"Tên đơn vị \(Company's name\):.*?\n\s*Mã số thuế \(Tax code\):.*?\n\s*"
+        r"Địa chỉ\s*:?\s*\(Address\):\s*(.*?)\n\s*"
+        r"(?:Tỷ giá|Hình thức thanh toán|Số tài khoản|Tên tàu|Kho xuất hàng|Mã ĐVQHNS|Số hộ chiếu)",
         text,
     )
     data["buyer"]["id_card"] = regex_value(
@@ -1001,7 +1331,7 @@ def parse_invoice_text_layer(text: str) -> dict[str, Any]:
         flags=re.IGNORECASE,
     )
     data["buyer"]["account_number"] = regex_value(
-        r"Số tài khoản \(Account number\):[ \t]*([^\n]*)",
+        r"Số tài khoản \((?:Account number|A/C No\.)\):[^\S\r\n]*([^\n]*)",
         text,
         flags=re.IGNORECASE,
     )
@@ -1032,6 +1362,26 @@ def parse_invoice_text_layer(text: str) -> dict[str, Any]:
     data["totals"]["total_payment"] = parse_vn_number(
         regex_value(r"Tổng cộng tiền thanh toán \(Total payment\):\s*([^\n]+)", text)
     )
+    summary_amounts = numeric_cells_after_label(
+        lines,
+        r"^(?:Tổng cộng|Cộng tiền hàng).*Total amount",
+        count=3,
+    )
+    if summary_amounts:
+        if data["totals"]["subtotal"] is None:
+            data["totals"]["subtotal"] = summary_amounts[0]
+        if len(summary_amounts) >= 2 and data["totals"]["vat_amount"] is None:
+            data["totals"]["vat_amount"] = summary_amounts[1]
+        if len(summary_amounts) >= 3 and data["totals"]["total_payment"] is None:
+            data["totals"]["total_payment"] = summary_amounts[2]
+    if data["totals"]["vat_rate"] is None and data["items"]:
+        item_vat_rates = [
+            item["vat_rate"]
+            for item in data["items"]
+            if isinstance(item.get("vat_rate"), (int, float))
+        ]
+        if len(set(item_vat_rates)) == 1:
+            data["totals"]["vat_rate"] = item_vat_rates[0]
     data["totals"]["amount_in_words"] = regex_value(
         r"Số tiền viết bằng chữ \(Amount in words\):\s*([^\n]+)",
         text,
@@ -1039,9 +1389,12 @@ def parse_invoice_text_layer(text: str) -> dict[str, Any]:
     data["signature"]["is_valid"] = (
         True if re.search(r"Signature Valid", text, re.IGNORECASE) else None
     )
-    data["signature"]["signed_by"] = regex_value(r"Ký bởi:\s*([^\n]+)", text)
+    data["signature"]["signed_by"] = (
+        regex_value(r"Ký bởi:\s*(.*?)(?:\n\s*(?:Ngày ký|Ký ngày):)", text)
+        or regex_value(r"Ký bởi:\s*([^\n]+)", text)
+    )
     data["signature"]["signed_date"] = regex_value(
-        r"Ngày ký:[ \t]*([^\n]*)",
+        r"(?:Ngày ký|Ký ngày):\s*([^\n]*)",
         text,
         flags=re.IGNORECASE,
     )
@@ -1056,6 +1409,25 @@ def has_meaningful_value(value: Any) -> bool:
     if isinstance(value, dict):
         return any(has_meaningful_value(item) for item in value.values())
     return True
+
+
+def is_text_layer_data_sufficient(data: Any) -> bool:
+    data = normalize_invoice_data(data)
+    if not isinstance(data, dict) or "parse_error" in data:
+        return False
+
+    invoice = data.get("invoice", {})
+    totals = data.get("totals", {})
+    has_invoice_identity = has_meaningful_value(invoice.get("invoice_number")) or (
+        has_meaningful_value(invoice.get("series"))
+        and has_meaningful_value(invoice.get("invoice_date"))
+    )
+    has_line_details = has_meaningful_value(data.get("items"))
+    has_total_details = has_meaningful_value(totals.get("total_payment")) or (
+        has_meaningful_value(totals.get("subtotal"))
+        and has_meaningful_value(totals.get("vat_amount"))
+    )
+    return has_invoice_identity and (has_line_details or has_total_details)
 
 
 TEXT_LAYER_CAN_CLEAR = {
@@ -1113,14 +1485,22 @@ def scan_invoice_file(
 
     results: list[dict[str, Any]] = []
     for page_index, image in enumerate(images, start=1):
-        raw_response = run_vintern_server(image=image, config=config)
-        page_data = normalize_invoice_data(parse_model_json(raw_response))
-
+        raw_response = None
+        text_layer_data = None
         if page_index - 1 < len(pdf_text_pages) and clean_text_value(
             pdf_text_pages[page_index - 1]
         ):
             text_layer_data = parse_invoice_text_layer(pdf_text_pages[page_index - 1])
-            page_data = overlay_invoice_data(page_data, text_layer_data)
+
+        if text_layer_data and is_text_layer_data_sufficient(text_layer_data):
+            page_data = text_layer_data
+            vision_model_used = False
+        else:
+            raw_response = run_vintern_server(image=image, config=config)
+            page_data = normalize_invoice_data(parse_model_json(raw_response))
+            if text_layer_data:
+                page_data = overlay_invoice_data(page_data, text_layer_data)
+            vision_model_used = True
 
         if not isinstance(page_data.get("metadata"), dict):
             page_data["metadata"] = {}
@@ -1129,6 +1509,7 @@ def scan_invoice_file(
                 "source_type": source_type,
                 "page_count": len(images),
                 "ocr_processed": True,
+                "vision_model_used": vision_model_used,
             }
         )
 
@@ -1137,7 +1518,7 @@ def scan_invoice_file(
             page_data["metadata"]["page_image_path"] = str(page_image_path)
 
         result = {"page": page_index, "data": page_data}
-        if config.include_raw_response:
+        if config.include_raw_response and raw_response is not None:
             result["raw_response"] = raw_response
         results.append(result)
 

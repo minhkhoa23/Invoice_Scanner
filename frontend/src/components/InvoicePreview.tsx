@@ -35,6 +35,13 @@ function formatMoney(value: number | null | undefined): string {
   return `${formatNumber(value)} đ`;
 }
 
+function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return empty;
+  }
+  return `${formatNumber(value)}%`;
+}
+
 export default function InvoicePreview({ data, pageNumber, pageCount }: InvoicePreviewProps) {
   const invoiceNumber = data.invoice?.invoice_number || "Chưa xác định";
   const total = data.totals?.total_payment;
@@ -97,14 +104,18 @@ export default function InvoicePreview({ data, pageNumber, pageCount }: InvoiceP
           Chi tiết dịch vụ / hàng hóa
         </h3>
         <div className="overflow-x-auto">
-          <table className="mt-4 min-w-[760px] w-full border-collapse text-left">
+          <table className="mt-4 min-w-[1120px] w-full border-collapse text-left">
             <thead>
               <tr className="bg-[#f3f2f0] font-mono text-xs font-bold uppercase text-muted">
                 <th className="px-3 py-3">Mô tả</th>
+                <th className="px-3 py-3">Container</th>
                 <th className="px-3 py-3 text-right">SL</th>
                 <th className="px-3 py-3 text-right">Đơn vị</th>
                 <th className="px-3 py-3 text-right">Đơn giá</th>
-                <th className="px-3 py-3 text-right">Thành tiền</th>
+                <th className="px-3 py-3 text-right">Trước thuế</th>
+                <th className="px-3 py-3 text-right">VAT</th>
+                <th className="px-3 py-3 text-right">Tiền thuế</th>
+                <th className="px-3 py-3 text-right">Tổng dòng</th>
               </tr>
             </thead>
             <tbody>
@@ -112,7 +123,7 @@ export default function InvoicePreview({ data, pageNumber, pageCount }: InvoiceP
                 items.map((item, index) => <ItemRow item={item} key={`${item.line_number}-${index}`} />)
               ) : (
                 <tr>
-                  <td className="border-b border-line px-3 py-5 text-muted" colSpan={5}>
+                  <td className="border-b border-line px-3 py-5 text-muted" colSpan={9}>
                     Không có dòng hàng hóa.
                   </td>
                 </tr>
@@ -172,13 +183,22 @@ function Field({
 }
 
 function ItemRow({ item }: { item: InvoiceItem }) {
+  const taxableAmount = item.taxable_amount ?? item.amount;
+  const lineTotal = item.total_amount ?? item.amount;
+
   return (
     <tr className="text-[15px]">
       <td className="border-b border-line px-3 py-4 font-medium">{display(item.description)}</td>
+      <td className="border-b border-line px-3 py-4 font-mono text-muted">
+        {display(item.container_number)}
+      </td>
       <td className="border-b border-line px-3 py-4 text-right font-mono">{formatNumber(item.quantity)}</td>
       <td className="border-b border-line px-3 py-4 text-right text-muted">{display(item.unit)}</td>
       <td className="border-b border-line px-3 py-4 text-right font-mono">{formatNumber(item.unit_price)}</td>
-      <td className="border-b border-line px-3 py-4 text-right font-mono font-bold">{formatNumber(item.amount)}</td>
+      <td className="border-b border-line px-3 py-4 text-right font-mono">{formatNumber(taxableAmount)}</td>
+      <td className="border-b border-line px-3 py-4 text-right font-mono">{formatPercent(item.vat_rate)}</td>
+      <td className="border-b border-line px-3 py-4 text-right font-mono">{formatNumber(item.vat_amount)}</td>
+      <td className="border-b border-line px-3 py-4 text-right font-mono font-bold">{formatNumber(lineTotal)}</td>
     </tr>
   );
 }

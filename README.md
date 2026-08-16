@@ -11,7 +11,7 @@ Pipeline chính nằm toàn bộ trong `OCR_invoice_GGUF_local.ipynb`.
 2. Mở terminal riêng, copy command được notebook in ra, ví dụ:
 
 ```powershell
-llama-server -hf rootonchair/Vintern-1B-v3_5-GGUF-ext:Q4_K_M --mmproj "D:/Invoice_Scanner/models/mmproj-Vintern-1B-v3_5-Q8_0.gguf" --chat-template vicuna --port 8081
+llama-server -hf rootonchair/Vintern-1B-v3_5-GGUF-ext:Q6_K --mmproj "D:/Invoice_Scanner/models/mmproj-Vintern-1B-v3_5-Q8_0.gguf" --chat-template vicuna --port 8081
 ```
 
 Giữ terminal server đó mở.

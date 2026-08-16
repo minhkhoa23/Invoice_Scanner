@@ -179,10 +179,17 @@ INVOICE_JSON_SCHEMA = {
         {
             "line_number": "number | null",
             "description": "string | null",
+            "description_lines": ["string"],
+            "item_type": "GOODS | SERVICE | FEE | OTHER | null",
+            "container_number": "string | null",
             "unit": "string | null",
             "quantity": "number | null",
             "unit_price": "number | null",
             "amount": "number | null",
+            "taxable_amount": "number | null",
+            "vat_rate": "number | null",
+            "vat_amount": "number | null",
+            "total_amount": "number | null",
         }
     ],
     "totals": {
@@ -215,6 +222,9 @@ Nhiệm vụ:
 - Chuẩn hóa ngày về YYYY-MM-DD nếu có thể.
 - Với số tiền, số lượng, đơn giá: trả về number, bỏ dấu phân cách hàng nghìn.
 - Giữ nguyên tiếng Việt có dấu trong tên công ty, địa chỉ và mô tả hàng hóa.
+- Với bảng hàng hóa/dịch vụ, không bỏ dòng mô tả bị xuống dòng. Gộp vào description và lưu từng dòng gốc trong description_lines.
+- Nếu mô tả có mã container như TGBU8540187 thì lưu vào container_number, vẫn giữ nguyên trong description.
+- Với từng item, amount/taxable_amount là thành tiền trước thuế; vat_rate, vat_amount và total_amount là thuế suất, tiền thuế và tổng tiền thanh toán của riêng dòng đó nếu có.
 - Không tự bịa thông tin không có trên ảnh.
 
 Schema bắt buộc:
@@ -535,6 +545,67 @@ def parse_model_json(response: Any) -> dict[str, Any]:
     }
 
 
+def extract_pdf_text_pages_if_available(input_path: str | Path) -> list[str]:
+    if Path(input_path).suffix.lower() != ".pdf":
+        return []
+    try:
+        from backend.app.pipeline import extract_pdf_text_pages
+    except Exception:
+        return []
+    return extract_pdf_text_pages(input_path)
+
+
+def enrich_with_pdf_text_layer(
+    page_data: dict[str, Any],
+    pdf_text_pages: list[str],
+    page_index: int,
+) -> dict[str, Any]:
+    try:
+        from backend.app.pipeline import (
+            clean_text_value,
+            normalize_invoice_data,
+            overlay_invoice_data,
+            parse_invoice_text_layer,
+        )
+    except Exception:
+        return page_data
+
+    page_data = normalize_invoice_data(page_data)
+    if page_index - 1 >= len(pdf_text_pages):
+        return page_data
+
+    page_text = pdf_text_pages[page_index - 1]
+    if not clean_text_value(page_text):
+        return page_data
+
+    return overlay_invoice_data(page_data, parse_invoice_text_layer(page_text))
+
+
+def extract_sufficient_pdf_text_layer_data(
+    pdf_text_pages: list[str],
+    page_index: int,
+) -> dict[str, Any] | None:
+    try:
+        from backend.app.pipeline import (
+            clean_text_value,
+            is_text_layer_data_sufficient,
+            normalize_invoice_data,
+            parse_invoice_text_layer,
+        )
+    except Exception:
+        return None
+
+    if page_index - 1 >= len(pdf_text_pages):
+        return None
+
+    page_text = pdf_text_pages[page_index - 1]
+    if not clean_text_value(page_text):
+        return None
+
+    page_data = parse_invoice_text_layer(page_text)
+    return normalize_invoice_data(page_data) if is_text_layer_data_sufficient(page_data) else None
+
+
 def response_to_text(response: Any) -> str:
     if isinstance(response, dict):
         choices = response.get("choices")
@@ -799,21 +870,27 @@ def scan_invoice_file(
         jpeg_quality=jpeg_quality,
     )
     results: list[dict[str, Any]] = []
+    pdf_text_pages = extract_pdf_text_pages_if_available(input_path)
 
     for page_index, image in enumerate(images, start=1):
         print(f"Processing page {page_index}/{len(images)}...")
+        raw_response = None
+        page_data = extract_sufficient_pdf_text_layer_data(pdf_text_pages, page_index)
 
-        raw_response = run_vintern_gguf(
-            llm=llm,
-            image=image,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            max_image_side=max_image_side,
-            jpeg_quality=jpeg_quality,
-        )
+        if page_data is None:
+            print("Text layer chưa đủ dữ liệu, chạy model vision...")
+            raw_response = run_vintern_gguf(
+                llm=llm,
+                image=image,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                max_image_side=max_image_side,
+                jpeg_quality=jpeg_quality,
+            )
+            page_data = parse_model_json(raw_response)
+            page_data = enrich_with_pdf_text_layer(page_data, pdf_text_pages, page_index)
 
-        page_data = parse_model_json(raw_response)
         if not isinstance(page_data.get("metadata"), dict):
             page_data["metadata"] = {}
 
@@ -822,6 +899,7 @@ def scan_invoice_file(
                 "source_type": source_type,
                 "page_count": len(images),
                 "ocr_processed": True,
+                "vision_model_used": raw_response is not None,
             }
         )
 
@@ -833,7 +911,7 @@ def scan_invoice_file(
             {
                 "page": page_index,
                 "data": page_data,
-                "raw_response": raw_response,
+                **({"raw_response": raw_response} if raw_response is not None else {}),
             }
         )
 
@@ -864,23 +942,29 @@ def scan_invoice_file_server(
         jpeg_quality=jpeg_quality,
     )
     results: list[dict[str, Any]] = []
+    pdf_text_pages = extract_pdf_text_pages_if_available(input_path)
 
     for page_index, image in enumerate(images, start=1):
-        print(f"Processing page {page_index}/{len(images)} via llama.cpp server...")
+        print(f"Processing page {page_index}/{len(images)}...")
+        raw_response = None
+        page_data = extract_sufficient_pdf_text_layer_data(pdf_text_pages, page_index)
 
-        raw_response = run_vintern_server(
-            image=image,
-            prompt=prompt,
-            server_url=server_url,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            max_image_side=max_image_side,
-            jpeg_quality=jpeg_quality,
-            timeout=timeout,
-        )
+        if page_data is None:
+            print("Text layer chưa đủ dữ liệu, chạy llama.cpp server...")
+            raw_response = run_vintern_server(
+                image=image,
+                prompt=prompt,
+                server_url=server_url,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                max_image_side=max_image_side,
+                jpeg_quality=jpeg_quality,
+                timeout=timeout,
+            )
+            page_data = parse_model_json(raw_response)
+            page_data = enrich_with_pdf_text_layer(page_data, pdf_text_pages, page_index)
 
-        page_data = parse_model_json(raw_response)
         if not isinstance(page_data.get("metadata"), dict):
             page_data["metadata"] = {}
 
@@ -889,6 +973,7 @@ def scan_invoice_file_server(
                 "source_type": source_type,
                 "page_count": len(images),
                 "ocr_processed": True,
+                "vision_model_used": raw_response is not None,
             }
         )
 
@@ -900,7 +985,7 @@ def scan_invoice_file_server(
             {
                 "page": page_index,
                 "data": page_data,
-                "raw_response": raw_response,
+                **({"raw_response": raw_response} if raw_response is not None else {}),
             }
         )
 
