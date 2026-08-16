@@ -11,6 +11,7 @@ services:
     environment:
       OCR_SERVER_URL: "${OCR_SERVER_URL:-http://llama-server:8081/v1}"
       OCR_SERVER_MODEL: "${OCR_SERVER_MODEL:-local-model}"
+      OCR_PDF_TEXT_STRATEGY: "${OCR_PDF_TEXT_STRATEGY:-assist}"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-20}"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}"
     volumes:

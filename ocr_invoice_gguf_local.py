@@ -58,6 +58,12 @@ IMAGE_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
+PDF_TEXT_STRATEGIES = {"assist", "fast", "off"}
+
+
+def normalize_pdf_text_strategy(value: str | None) -> str:
+    strategy = (value or "assist").strip().lower()
+    return strategy if strategy in PDF_TEXT_STRATEGIES else "assist"
 
 
 def require_pillow() -> tuple[Any, Any]:
@@ -606,6 +612,14 @@ def extract_sufficient_pdf_text_layer_data(
     return normalize_invoice_data(page_data) if is_text_layer_data_sufficient(page_data) else None
 
 
+def is_blank_page_if_available(image: Any) -> bool:
+    try:
+        from backend.app.pipeline import is_probably_blank_image
+    except Exception:
+        return False
+    return is_probably_blank_image(image)
+
+
 def response_to_text(response: Any) -> str:
     if isinstance(response, dict):
         choices = response.get("choices")
@@ -860,6 +874,7 @@ def scan_invoice_file(
     temperature: float = 0.0,
     max_image_side: int = 1800,
     jpeg_quality: int = 92,
+    pdf_text_strategy: str = "assist",
 ) -> list[dict[str, Any]]:
     images, source_type, image_paths = load_input_images_with_paths(
         input_path=input_path,
@@ -870,12 +885,36 @@ def scan_invoice_file(
         jpeg_quality=jpeg_quality,
     )
     results: list[dict[str, Any]] = []
-    pdf_text_pages = extract_pdf_text_pages_if_available(input_path)
+    pdf_text_strategy = normalize_pdf_text_strategy(pdf_text_strategy)
+    pdf_text_pages = (
+        []
+        if pdf_text_strategy == "off"
+        else extract_pdf_text_pages_if_available(input_path)
+    )
 
     for page_index, image in enumerate(images, start=1):
         print(f"Processing page {page_index}/{len(images)}...")
         raw_response = None
-        page_data = extract_sufficient_pdf_text_layer_data(pdf_text_pages, page_index)
+        page_text_layer_available = (
+            page_index - 1 < len(pdf_text_pages)
+            and bool(clean_text_value(pdf_text_pages[page_index - 1]))
+        )
+        text_layer_shortcut_used = False
+        text_layer_overlay_used = False
+        page_data = (
+            extract_sufficient_pdf_text_layer_data(pdf_text_pages, page_index)
+            if pdf_text_strategy == "fast"
+            else None
+        )
+        text_layer_shortcut_used = page_data is not None
+
+        if page_data is None and is_blank_page_if_available(image):
+            print("Trang gần như trắng, bỏ qua model vision.")
+            page_data = {
+                "metadata": {
+                    "blank_page_skipped": True,
+                }
+            }
 
         if page_data is None:
             print("Text layer chưa đủ dữ liệu, chạy model vision...")
@@ -890,6 +929,7 @@ def scan_invoice_file(
             )
             page_data = parse_model_json(raw_response)
             page_data = enrich_with_pdf_text_layer(page_data, pdf_text_pages, page_index)
+            text_layer_overlay_used = page_text_layer_available
 
         if not isinstance(page_data.get("metadata"), dict):
             page_data["metadata"] = {}
@@ -899,7 +939,11 @@ def scan_invoice_file(
                 "source_type": source_type,
                 "page_count": len(images),
                 "ocr_processed": True,
+                "pdf_text_layer_used": page_text_layer_available,
                 "vision_model_used": raw_response is not None,
+                "pdf_text_strategy": pdf_text_strategy,
+                "text_layer_shortcut_used": text_layer_shortcut_used,
+                "text_layer_overlay_used": text_layer_overlay_used,
             }
         )
 
@@ -932,6 +976,7 @@ def scan_invoice_file_server(
     max_image_side: int = 1800,
     jpeg_quality: int = 92,
     timeout: int = 600,
+    pdf_text_strategy: str = "assist",
 ) -> list[dict[str, Any]]:
     images, source_type, image_paths = load_input_images_with_paths(
         input_path=input_path,
@@ -942,12 +987,36 @@ def scan_invoice_file_server(
         jpeg_quality=jpeg_quality,
     )
     results: list[dict[str, Any]] = []
-    pdf_text_pages = extract_pdf_text_pages_if_available(input_path)
+    pdf_text_strategy = normalize_pdf_text_strategy(pdf_text_strategy)
+    pdf_text_pages = (
+        []
+        if pdf_text_strategy == "off"
+        else extract_pdf_text_pages_if_available(input_path)
+    )
 
     for page_index, image in enumerate(images, start=1):
         print(f"Processing page {page_index}/{len(images)}...")
         raw_response = None
-        page_data = extract_sufficient_pdf_text_layer_data(pdf_text_pages, page_index)
+        page_text_layer_available = (
+            page_index - 1 < len(pdf_text_pages)
+            and bool(clean_text_value(pdf_text_pages[page_index - 1]))
+        )
+        text_layer_shortcut_used = False
+        text_layer_overlay_used = False
+        page_data = (
+            extract_sufficient_pdf_text_layer_data(pdf_text_pages, page_index)
+            if pdf_text_strategy == "fast"
+            else None
+        )
+        text_layer_shortcut_used = page_data is not None
+
+        if page_data is None and is_blank_page_if_available(image):
+            print("Trang gần như trắng, bỏ qua llama.cpp server.")
+            page_data = {
+                "metadata": {
+                    "blank_page_skipped": True,
+                }
+            }
 
         if page_data is None:
             print("Text layer chưa đủ dữ liệu, chạy llama.cpp server...")
@@ -964,6 +1033,7 @@ def scan_invoice_file_server(
             )
             page_data = parse_model_json(raw_response)
             page_data = enrich_with_pdf_text_layer(page_data, pdf_text_pages, page_index)
+            text_layer_overlay_used = page_text_layer_available
 
         if not isinstance(page_data.get("metadata"), dict):
             page_data["metadata"] = {}
@@ -973,7 +1043,11 @@ def scan_invoice_file_server(
                 "source_type": source_type,
                 "page_count": len(images),
                 "ocr_processed": True,
+                "pdf_text_layer_used": page_text_layer_available,
                 "vision_model_used": raw_response is not None,
+                "pdf_text_strategy": pdf_text_strategy,
+                "text_layer_shortcut_used": text_layer_shortcut_used,
+                "text_layer_overlay_used": text_layer_overlay_used,
             }
         )
 
@@ -1094,6 +1168,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="DPI used when rendering PDF pages.",
     )
     parser.add_argument(
+        "--pdf-text-strategy",
+        default="assist",
+        choices=sorted(PDF_TEXT_STRATEGIES),
+        help=(
+            "How to use PDF text layer: assist runs vision model and overlays text, "
+            "fast skips vision when text is sufficient, off uses only vision."
+        ),
+    )
+    parser.add_argument(
         "--save-pdf-images",
         action="store_true",
         help="Save rendered PDF pages as images before OCR.",
@@ -1163,6 +1246,7 @@ def main() -> None:
             temperature=args.temperature,
             max_image_side=args.max_image_side,
             jpeg_quality=args.jpeg_quality,
+            pdf_text_strategy=args.pdf_text_strategy,
         )
     else:
         results = scan_invoice_file_server(
@@ -1178,6 +1262,7 @@ def main() -> None:
             max_image_side=args.max_image_side,
             jpeg_quality=args.jpeg_quality,
             timeout=args.timeout,
+            pdf_text_strategy=args.pdf_text_strategy,
         )
 
     save_results(

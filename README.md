@@ -175,6 +175,38 @@ Nếu có đổi code frontend/backend hoặc đổi dependency:
 docker compose up --build
 ```
 
+### Chế độ OCR PDF
+
+Mặc định Docker dùng:
+
+```text
+OCR_PDF_TEXT_STRATEGY=assist
+```
+
+Ở chế độ này, PDF có text layer vẫn được render thành ảnh và chạy qua Vintern
+vision model. Text layer chỉ được dùng làm lớp hỗ trợ để sửa các trường dễ sai
+như số hóa đơn, mã số thuế, dòng hàng và tổng tiền.
+
+Các giá trị có thể dùng:
+
+- `assist`: chạy vision model cho trang có nội dung, rồi dùng text layer hỗ trợ.
+- `fast`: nếu text layer đủ tin cậy thì bỏ qua vision model để trả kết quả nhanh.
+- `off`: không dùng text layer, chỉ dùng vision model.
+
+Ví dụ muốn benchmark chế độ chỉ dùng model:
+
+```powershell
+$env:OCR_PDF_TEXT_STRATEGY="off"
+docker compose up --build
+```
+
+Ví dụ muốn chạy nhanh với PDF điện tử:
+
+```powershell
+$env:OCR_PDF_TEXT_STRATEGY="fast"
+docker compose up --build
+```
+
 ### 3. Dừng app
 
 Nhấn `Ctrl+C` ở terminal đang chạy Docker, sau đó nếu muốn dừng hẳn container:

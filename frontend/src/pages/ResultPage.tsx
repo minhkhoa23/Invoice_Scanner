@@ -20,7 +20,7 @@ export default function ResultPage() {
   const [loading, setLoading] = useState(!initialResult);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("preview");
-  const [selectedPage, setSelectedPage] = useState(0);
+  const [selectedPage, setSelectedPage] = useState(-1);
 
   useEffect(() => {
     if (result || !jobId) {
@@ -55,7 +55,11 @@ export default function ResultPage() {
     if (!result?.pages.length) {
       return null;
     }
-    return result.pages[Math.min(selectedPage, result.pages.length - 1)];
+    if (selectedPage < 0 && result.page_count > 1) {
+      return { page: 0, data: result.data, label: "Tổng hợp" };
+    }
+    const pageIndex = selectedPage < 0 ? 0 : Math.min(selectedPage, result.pages.length - 1);
+    return result.pages[pageIndex];
   }, [result, selectedPage]);
 
   const downloadJson = () => {
@@ -64,7 +68,7 @@ export default function ResultPage() {
     }
     const anchor = document.createElement("a");
     anchor.href = apiFileUrl(result.download_url);
-    anchor.download = `${result.filename.replace(/\.pdf$/i, "")}.json`;
+    anchor.download = `${result.filename.replace(/\.[^.]+$/i, "")}.json`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -108,6 +112,17 @@ export default function ResultPage() {
 
             {result.pages.length > 1 && (
               <div className="mb-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedPage(-1)}
+                  className={`h-9 rounded border px-3 font-mono text-sm font-semibold ${
+                    selectedPage < 0
+                      ? "border-brand bg-brand text-white"
+                      : "border-line bg-white text-muted"
+                  }`}
+                >
+                  Tổng hợp
+                </button>
                 {result.pages.map((page, index) => (
                   <button
                     key={page.page}
@@ -131,6 +146,7 @@ export default function ResultPage() {
               data={currentPage.data}
               pageNumber={currentPage.page}
               pageCount={result.page_count}
+              pageLabel={"label" in currentPage ? currentPage.label : undefined}
             />
           ) : (
             <JsonRaw result={result} />

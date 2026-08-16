@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -153,7 +154,16 @@ class OCRConfig:
     request_timeout: int = 600
     use_image_enhancement: bool = True
     use_pdf_text_layer: bool = True
+    pdf_text_strategy: str = "assist"
     include_raw_response: bool = False
+
+
+PDF_TEXT_STRATEGIES = {"assist", "fast", "off"}
+
+
+def normalize_pdf_text_strategy(value: str | None) -> str:
+    strategy = (value or "assist").strip().lower()
+    return strategy if strategy in PDF_TEXT_STRATEGIES else "assist"
 
 
 def ocr_config_from_env() -> OCRConfig:
@@ -170,6 +180,9 @@ def ocr_config_from_env() -> OCRConfig:
         != "false",
         use_pdf_text_layer=os.getenv("OCR_USE_PDF_TEXT_LAYER", "true").lower()
         != "false",
+        pdf_text_strategy=normalize_pdf_text_strategy(
+            os.getenv("OCR_PDF_TEXT_STRATEGY", "assist")
+        ),
         include_raw_response=os.getenv("OCR_INCLUDE_RAW_RESPONSE", "false").lower()
         == "true",
     )
@@ -331,6 +344,20 @@ def enhance_invoice_image(image: Image.Image) -> Image.Image:
     image = ImageEnhance.Contrast(image).enhance(1.15)
     image = ImageEnhance.Sharpness(image).enhance(1.25)
     return image.filter(ImageFilter.UnsharpMask(radius=1.2, percent=120, threshold=3))
+
+
+def is_probably_blank_image(
+    image: Image.Image,
+    white_threshold: int = 245,
+    ink_ratio_threshold: float = 0.001,
+) -> bool:
+    grayscale = ImageOps.exif_transpose(image).convert("L")
+    grayscale.thumbnail((400, 400), Image.Resampling.LANCZOS)
+    pixels = list(grayscale.getdata())
+    if not pixels:
+        return True
+    ink_pixels = sum(1 for pixel in pixels if pixel < white_threshold)
+    return (ink_pixels / len(pixels)) < ink_ratio_threshold
 
 
 def normalize_image(
@@ -759,6 +786,8 @@ NUMERIC_FIELD_NAMES = ITEM_NUMBER_FIELDS | {
 
 PLACEHOLDER_TEXT_VALUES = {
     "-",
+    ".",
+    "\\",
     "n/a",
     "na",
     "none",
@@ -1019,6 +1048,286 @@ def normalized_text_lines(text: str) -> list[str]:
     return lines
 
 
+def strip_accents(value: Any) -> str:
+    value = str(value).replace("đ", "d").replace("Đ", "D")
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFD", value)
+        if unicodedata.category(character) != "Mn"
+    )
+
+
+def compact_match_text(value: Any) -> str:
+    value = clean_text_value(value) or ""
+    value = strip_accents(value).lower()
+    return re.sub(r"[^a-z0-9]+", "", value)
+
+
+def plain_layout_text(value: Any) -> str:
+    value = clean_text_value(value) or ""
+    value = re.sub(r"\s*\|\s*", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def split_layout_cells(value: Any) -> list[str]:
+    value = clean_text_value(value)
+    if not value:
+        return []
+    return [
+        cell
+        for cell in (clean_text_value(part) for part in re.split(r"\s*\|\s*", value))
+        if cell
+    ]
+
+
+KNOWN_LABEL_COMPACT_MARKERS = {
+    "masothue",
+    "taxcode",
+    "vatcode",
+    "diachi",
+    "address",
+    "sotaikhoan",
+    "bankac",
+    "accountno",
+    "hinhthucthanhtoan",
+    "paymentmethod",
+    "modeofpayment",
+    "tendonvi",
+    "company",
+    "companysname",
+    "hovatennguoimuahang",
+    "hotennguoimuahang",
+    "nguoimuahang",
+    "customer",
+    "agent",
+    "donvibanhang",
+    "seller",
+    "dienthoai",
+    "tongdai",
+    "callcenter",
+    "tel",
+    "email",
+    "website",
+    "sodinhdanh",
+    "sohochieu",
+    "maquanhe",
+    "tygia",
+    "exchangerate",
+    "donvitiente",
+    "currency",
+    "tentau",
+    "nameofvessel",
+    "kho",
+    "shipfromwarehouse",
+    "kyhieu",
+    "serial",
+    "macoquanthue",
+    "macqt",
+    "mcqt",
+    "mccqt",
+    "ngay",
+    "date",
+}
+
+
+def is_known_label_cell(value: Any) -> bool:
+    compact = compact_match_text(value)
+    if not compact:
+        return False
+    return any(marker in compact for marker in KNOWN_LABEL_COMPACT_MARKERS)
+
+
+def is_provider_noise_line(value: Any) -> bool:
+    compact = compact_match_text(value)
+    return bool(
+        "donvicungcap" in compact
+        or ("giaiphap" in compact and "hoadondientu" in compact)
+        or ("duoccungcap" in compact and "mst" in compact)
+    )
+
+
+def is_table_header_line(value: Any) -> bool:
+    compact = compact_match_text(value)
+    return bool(
+        ("stt" in compact or "no" in compact)
+        and (
+            "tenhang" in compact
+            or "description" in compact
+            or "hanghoa" in compact
+            or "dichvu" in compact
+        )
+    )
+
+
+def is_table_header_guide_line(value: Any) -> bool:
+    compact = compact_match_text(value)
+    cells = split_layout_cells(value)
+    if not compact:
+        return False
+    if is_table_total_boundary(value):
+        return False
+    if is_amount_column_marker(value):
+        return True
+    if re.fullmatch(r"(?:\(?\d+\)?|x|=)+", compact):
+        return True
+    if cells and all(
+        re.fullmatch(r"\(?\d+\)?|x|=", compact_match_text(cell)) for cell in cells
+    ):
+        return True
+    return bool(
+        any(
+            marker in compact
+            for marker in [
+                "description",
+                "quantity",
+                "unitprice",
+                "amount",
+                "vatrate",
+                "vatamount",
+            ]
+        )
+        and not has_numeric_token(value)
+    )
+
+
+def line_matches_compact(value: Any, *patterns: str) -> bool:
+    compact = compact_match_text(value)
+    return any(re.search(pattern, compact) for pattern in patterns)
+
+
+def clean_labeled_value(value: Any) -> str | None:
+    value = clean_text_value(value)
+    if not value:
+        return None
+    value = re.sub(
+        r"^\s*\)?\s*[:：]?\s*(?:\([^)]*\)\s*)?\)?\s*[:：]?\s*",
+        "",
+        value,
+    ).strip()
+    value = re.split(
+        r"\s+(?:Mã\s*số\s*thuế|MST|Tax\s*code|VAT\s*code|Địa\s*chỉ|Address|"
+        r"Số\s*tài\s*khoản|Bank\s*A/C|A/C\s*No\.?|Hình\s*thức\s*thanh\s*toán|"
+        r"Payment\s*method|Tên\s*đơn\s*vị|Company|Điện\s*thoại|Tel|Email|Website|Tại)\s*"
+        r"(?:\([^)]*\))?\s*:",
+        value,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    value = re.sub(r"(?:\s+[a-z]){1,4}$", "", value)
+    value = value.strip(" ,;|")
+    return clean_text_value(value)
+
+
+def value_after_label_in_cell(cell: str, label_pattern: str) -> str | None:
+    match = re.search(label_pattern, cell, re.IGNORECASE)
+    if not match:
+        return None
+    return clean_labeled_value(cell[match.end() :])
+
+
+def extract_labeled_value(
+    lines: list[str],
+    label_pattern: str,
+    start: int = 0,
+    end: int | None = None,
+    multiline: bool = False,
+    max_following_lines: int = 2,
+) -> str | None:
+    end = len(lines) if end is None else min(end, len(lines))
+    for index in range(start, end):
+        if is_provider_noise_line(lines[index]):
+            continue
+        cells = split_layout_cells(lines[index]) or [lines[index]]
+        for cell_index, cell in enumerate(cells):
+            if not re.search(label_pattern, cell, re.IGNORECASE):
+                continue
+
+            parts: list[str] = []
+            same_cell_value = value_after_label_in_cell(cell, label_pattern)
+            if same_cell_value:
+                parts.append(same_cell_value)
+
+            if not parts:
+                for following_cell in cells[cell_index + 1 :]:
+                    if is_known_label_cell(following_cell):
+                        break
+                    if following_cell and len(compact_match_text(following_cell)) > 2:
+                        parts.append(following_cell)
+
+            if multiline:
+                for following_line in lines[index + 1 : min(end, index + 1 + max_following_lines)]:
+                    if (
+                        is_known_label_cell(following_line)
+                        or is_table_header_line(following_line)
+                        or is_table_total_boundary(following_line)
+                    ):
+                        break
+                    parts.append(following_line)
+
+            value = clean_labeled_value(" ".join(parts))
+            if value:
+                return value
+    return None
+
+
+def find_line_index(
+    lines: list[str],
+    *patterns: str,
+    start: int = 0,
+    end: int | None = None,
+) -> int | None:
+    end = len(lines) if end is None else min(end, len(lines))
+    for index in range(start, end):
+        if line_matches_compact(lines[index], *patterns):
+            return index
+    return None
+
+
+def looks_like_company_name(value: Any) -> bool:
+    compact = compact_match_text(value)
+    return bool(
+        re.search(
+            r"congty|cty|trungtam|benhvien|chicuc|cuc|tongcongty|hopta",
+            compact,
+        )
+    )
+
+
+def extract_company_before_tax(lines: list[str], tax_index: int) -> str | None:
+    candidates: list[str] = []
+    for line in reversed(lines[max(0, tax_index - 5) : tax_index]):
+        for cell in split_layout_cells(line) or [line]:
+            if is_known_label_cell(cell) and not looks_like_company_name(cell):
+                continue
+            value = clean_labeled_value(cell)
+            if value and looks_like_company_name(value):
+                candidates.append(value)
+    for value in candidates:
+        if re.search(r"\bC[ÔO]NG\s*TY\b|\bCTY\b", value, re.IGNORECASE):
+            return value
+    return candidates[0] if candidates else None
+
+
+def find_table_start_index(lines: list[str]) -> int | None:
+    header_index = None
+    for index, line in enumerate(lines):
+        if is_table_header_line(line):
+            header_index = index
+            break
+
+    if header_index is None:
+        for index, line in enumerate(lines):
+            if is_amount_column_marker(line):
+                return index + 1
+        return None
+
+    start_index = header_index + 1
+    for index in range(header_index + 1, min(len(lines), header_index + 12)):
+        if is_table_header_guide_line(lines[index]):
+            start_index = index + 1
+    return start_index
+
+
 def compact_table_marker(value: Any) -> str:
     value = clean_text_value(value) or ""
     return re.sub(r"\s+", "", value.lower()).replace("×", "x")
@@ -1034,11 +1343,12 @@ def is_post_amount_header_marker(value: Any) -> bool:
 
 def is_table_total_boundary(value: Any) -> bool:
     value = clean_text_value(value) or ""
+    compact = compact_match_text(value)
     return bool(
         re.search(
-            r"Cộng tiền hàng|Tổng cộng|Total amount|Số tiền viết bằng chữ|Amount in words",
-            value,
-            re.IGNORECASE,
+            r"congtien(?:hang|hanghoa|dichvu)|subtotal|tongcong|tongtien"
+            r"|tongthanhtoan|sotien(?:viet)?bangchu|amountinwords|inwords",
+            compact,
         )
     )
 
@@ -1054,6 +1364,25 @@ def is_numeric_cell(value: Any) -> bool:
         return False
     value = re.sub(r"\b(?:vnd|vnđ|đ)\b", "", value, flags=re.IGNORECASE).strip()
     return bool(re.fullmatch(r"[-+]?\d+(?:[.,]\d+)*", value))
+
+
+def numeric_token_matches(value: Any) -> list[re.Match[str]]:
+    value = clean_text_value(value) or ""
+    return list(re.finditer(r"[-+]?\d+(?:[.,]\d+)*(?:\s*%)?", value))
+
+
+def has_numeric_token(value: Any) -> bool:
+    return any("%" not in match.group(0) for match in numeric_token_matches(value))
+
+
+def extract_numeric_tokens(value: Any, include_percent: bool = False) -> list[str]:
+    tokens: list[str] = []
+    for match in numeric_token_matches(value):
+        token = re.sub(r"\s+", "", match.group(0))
+        if "%" in token and not include_percent:
+            continue
+        tokens.append(token)
+    return tokens
 
 
 def is_percent_cell(value: Any) -> bool:
@@ -1095,85 +1424,355 @@ def split_contact_values(value: Any) -> list[str]:
 def parse_seller_from_text(text: str) -> dict[str, Any]:
     lines = normalized_text_lines(text)
     seller = blank_invoice_json()["seller"]
-
-    tax_line_index = None
-    for index, line in enumerate(lines):
-        if not re.search(r"Mã số thuế\s*\(Tax code\)", line, re.IGNORECASE):
-            continue
-        previous_line = lines[index - 1] if index > 0 else ""
-        if "Tên đơn vị" in previous_line or "Company's name" in previous_line:
-            continue
-        tax_line_index = index
-        seller["tax_code"] = normalize_tax_code(text_after_colon(line))
-        break
-
-    if tax_line_index is None:
-        return seller
-
-    previous_lines = lines[max(0, tax_line_index - 3) : tax_line_index]
-    previous_lines = [
-        line
-        for line in previous_lines
-        if not re.search(r"Điện thoại|ĐT|Tel", line, re.IGNORECASE)
-    ]
-    if previous_lines:
-        english_line = previous_lines[-1]
-        seller["english_name"] = clean_text_value(english_line.strip("() "))
-    if len(previous_lines) >= 2:
-        seller["name"] = clean_text_value(previous_lines[-2])
-
-    for index in range(tax_line_index + 1, len(lines)):
-        if not re.search(r"Địa chỉ\s*\(Address\)", lines[index], re.IGNORECASE):
-            continue
-
-        address_parts = [text_after_colon(lines[index])]
-        for following in lines[index + 1 :]:
-            if re.search(
-                r"^(?:ĐT|Điện thoại|Tài khoản|Mã của cơ quan thuế|Mã CQT|HÓA ĐƠN|Email|Website)\b",
-                following,
-                re.IGNORECASE,
-            ):
-                break
-            address_parts.append(following)
-        seller["address"] = clean_text_value(
-            " ".join(part for part in address_parts if part)
+    table_start = find_table_start_index(lines) or len(lines)
+    seller_start = (
+        find_line_index(lines, r"donvibanhang", r"seller", end=table_start) or 0
+    )
+    buyer_start = (
+        find_line_index(
+            lines,
+            r"hovatennguoimuahang",
+            r"hotennguoimuahang",
+            r"nguoimuahang",
+            r"customer",
+            r"agent",
+            start=seller_start,
+            end=table_start,
         )
-        break
+        or table_start
+    )
 
-    for line in lines:
-        contact_match = re.search(
-            r"(?:ĐT|Điện thoại)\s*\(Tel\):\s*(.*)$",
-            line,
-            re.IGNORECASE,
+    seller["name"] = extract_labeled_value(
+        lines,
+        r"Đơn\s*vị\s*bán\s*hàng\s*(?:\([^)]*\))?|Seller",
+        start=seller_start,
+        end=buyer_start,
+    )
+    seller["tax_code"] = normalize_tax_code(
+        extract_labeled_value(
+            lines,
+            r"Mã\s*số\s*thuế\s*(?:\([^)]*\))?|MST|Tax\s*code|VAT\s*code",
+            start=seller_start,
+            end=buyer_start,
         )
-        if not contact_match:
-            continue
-        contact_line = clean_text_value(contact_match.group(1)) or ""
-        phone_part = contact_line.split("Fax:", 1)[0]
-        fax_part = contact_line.split("Fax:", 1)[1] if "Fax:" in contact_line else ""
+    )
+    if not seller["name"]:
+        tax_index = find_line_index(
+            lines,
+            r"masothue",
+            r"taxcode",
+            r"vatcode",
+            start=seller_start,
+            end=buyer_start,
+        )
+        if tax_index is not None:
+            seller["name"] = extract_company_before_tax(lines, tax_index)
+
+    seller["address"] = extract_labeled_value(
+        lines,
+        r"Địa\s*chỉ\s*(?:\([^)]*\))?|Address",
+        start=seller_start,
+        end=buyer_start,
+        multiline=True,
+        max_following_lines=3,
+    )
+    phone = extract_labeled_value(
+        lines,
+        r"(?:ĐT|Điện\s*thoại|Tổng\s*đài|Tel\.?|Call\s*center)\s*(?:\([^)]*\))?",
+        start=seller_start,
+        end=buyer_start,
+    )
+    if phone:
+        phone_part = re.split(r"\bFax\s*:?", phone, maxsplit=1, flags=re.IGNORECASE)[0]
         seller["phone"] = split_contact_values(phone_part)
-        seller["fax"] = split_contact_values(fax_part)
-        break
+    fax = extract_labeled_value(
+        lines,
+        r"Fax",
+        start=seller_start,
+        end=buyer_start,
+    )
+    if fax:
+        seller["fax"] = split_contact_values(fax)
+    seller["email"] = extract_labeled_value(
+        lines,
+        r"Email",
+        start=seller_start,
+        end=buyer_start,
+    )
+    seller["website"] = extract_labeled_value(
+        lines,
+        r"Website",
+        start=seller_start,
+        end=buyer_start,
+    )
 
-    for line in lines:
-        email_match = re.search(r"Email:\s*(.*?)\s+Website:\s*(.+)$", line, re.IGNORECASE)
-        if email_match:
-            seller["email"] = clean_text_value(email_match.group(1))
-            seller["website"] = clean_text_value(email_match.group(2))
-            break
+    for index, line in enumerate(lines[:buyer_start]):
+        value = clean_text_value(line.strip("() "))
+        if value and re.fullmatch(r"[A-Z0-9 .,&'/-]+", strip_accents(value)):
+            previous = lines[index - 1] if index > 0 else ""
+            if seller["name"] and value != seller["name"] and seller["name"] in previous:
+                seller["english_name"] = value
+                break
 
     return seller
 
 
+def page_to_layout_text(page: Any, y_tolerance: float = 3.0, gap_tolerance: float = 12.0) -> str:
+    words = page.get_text("words")
+    if not words:
+        return ""
+
+    rows: list[dict[str, Any]] = []
+    for word in sorted(words, key=lambda item: (round(item[1] / y_tolerance), item[0])):
+        x0, y0, x1, y1, text, *_ = word
+        center_y = (y0 + y1) / 2
+        for row in rows:
+            if abs(row["center_y"] - center_y) <= y_tolerance:
+                row["words"].append((x0, y0, x1, y1, text))
+                row["center_y"] = (
+                    row["center_y"] * (len(row["words"]) - 1) + center_y
+                ) / len(row["words"])
+                break
+        else:
+            rows.append({"center_y": center_y, "words": [(x0, y0, x1, y1, text)]})
+
+    lines: list[str] = []
+    for row in sorted(rows, key=lambda item: item["center_y"]):
+        parts: list[str] = []
+        previous_x1 = None
+        for x0, _y0, x1, _y1, text in sorted(row["words"], key=lambda item: item[0]):
+            if previous_x1 is not None and x0 - previous_x1 > gap_tolerance:
+                parts.append("|")
+            parts.append(text)
+            previous_x1 = x1
+        line = clean_text_value(" ".join(parts))
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def extract_pdf_text_pages(pdf_path: str | Path) -> list[str]:
     document = fitz.open(pdf_path)
-    pages = [page.get_text("text") for page in document]
+    pages = []
+    for page in document:
+        layout_text = page_to_layout_text(page)
+        raw_text = page.get_text("text")
+        pages.append(layout_text or raw_text)
     document.close()
     return pages
 
 
+COMMON_UNIT_VALUES = {
+    "cai",
+    "chiec",
+    "bo",
+    "hop",
+    "thung",
+    "goi",
+    "chai",
+    "lon",
+    "kg",
+    "g",
+    "tan",
+    "ta",
+    "yen",
+    "m",
+    "m2",
+    "m3",
+    "cm",
+    "cm2",
+    "lan",
+    "chuyen",
+    "ngay",
+    "gio",
+    "thang",
+    "pcs",
+    "set",
+    "unit",
+    "dv",
+    "dvt",
+}
+
+
+def split_description_unit(value: Any) -> tuple[str | None, str | None]:
+    value = clean_text_value(value)
+    if not value:
+        return None, None
+    parts = value.rsplit(" ", 1)
+    if len(parts) == 2 and compact_match_text(parts[1]) in COMMON_UNIT_VALUES:
+        return clean_text_value(parts[0]), clean_text_value(parts[1])
+    return value, None
+
+
+def is_table_noise_line(value: Any) -> bool:
+    value = clean_text_value(value)
+    if not value:
+        return True
+    compact = compact_match_text(value)
+    if len(compact) <= 2:
+        return True
+    if is_provider_noise_line(value):
+        return True
+    if is_table_header_guide_line(value):
+        return True
+    return bool(
+        re.search(
+            r"chuyensangtrangsau|tieptheotrangtruoc|tracu|matracuu|trang\d+"
+            r"|donvicungcapgiaiphap|giaiphaps|nguoimuahang|nguoibanhang"
+            r"|signaturevalid|kyboi|kyngay",
+            compact,
+        )
+    )
+
+
+def parse_layout_item_row(line: str) -> dict[str, Any] | None:
+    cells = split_layout_cells(line)
+    if len(cells) < 2:
+        return None
+
+    line_number = None
+    description = None
+    unit = None
+    numeric_start = None
+
+    if is_item_line_number(cells[0]):
+        line_number = int(clean_text_value(cells[0]) or 0)
+        if len(cells) >= 5 and not is_numeric_cell(cells[1]):
+            if has_numeric_token(cells[2]):
+                unit = cells[1]
+                numeric_start = 2
+            elif len(cells) >= 6 and has_numeric_token(cells[3]):
+                description = cells[1]
+                unit = cells[2]
+                numeric_start = 3
+    else:
+        match = re.match(r"^(\d{1,3})\s+(.+)$", cells[0])
+        if match and len(cells) >= 4:
+            line_number = int(match.group(1))
+            description, unit = split_description_unit(match.group(2))
+            numeric_start = 1
+
+    if line_number is None or numeric_start is None:
+        return None
+
+    numeric_text = " ".join(cells[numeric_start:])
+    number_tokens = extract_numeric_tokens(numeric_text)
+    if len(number_tokens) < 3:
+        return None
+
+    percent_tokens = [
+        token for token in extract_numeric_tokens(numeric_text, include_percent=True) if "%" in token
+    ]
+    quantity = parse_vn_number(number_tokens[0])
+    unit_price = parse_vn_number(number_tokens[1])
+    amount = parse_vn_number(number_tokens[2])
+    total_amount = parse_vn_number(number_tokens[-1]) if len(number_tokens) >= 4 else None
+
+    item = {
+        "line_number": line_number,
+        "description": description,
+        "description_lines": [description] if description else [],
+        "unit": clean_text_value(unit),
+        "quantity": quantity,
+        "unit_price": unit_price,
+        "amount": amount,
+        "taxable_amount": amount,
+    }
+    if percent_tokens:
+        item["vat_rate"] = parse_vn_percent(percent_tokens[0])
+        if len(number_tokens) >= 4:
+            item["vat_amount"] = parse_vn_number(number_tokens[-2])
+            item["total_amount"] = total_amount
+    elif total_amount is not None:
+        item["total_amount"] = total_amount
+
+    return item
+
+
+def normalize_description_lines(lines: list[str]) -> list[str]:
+    normalized = []
+    for line in lines:
+        value = clean_text_value(line)
+        if value and not is_table_noise_line(value):
+            normalized.append(value)
+    return normalized
+
+
+def apply_item_description(
+    item: dict[str, Any],
+    prefix_lines: list[str],
+    suffix_lines: list[str] | None = None,
+) -> dict[str, Any]:
+    description_lines = normalize_description_lines(prefix_lines)
+    description_lines.extend(normalize_description_lines(item.get("description_lines", [])))
+    if suffix_lines:
+        description_lines.extend(normalize_description_lines(suffix_lines))
+    if description_lines:
+        item["description_lines"] = description_lines
+        item["description"] = clean_text_value(" ".join(description_lines))
+    return item
+
+
+def parse_invoice_items_from_layout_lines(lines: list[str]) -> list[dict[str, Any]]:
+    start_index = find_table_start_index(lines)
+    if start_index is None:
+        return []
+
+    end_index = len(lines)
+    for index in range(start_index, len(lines)):
+        if is_table_total_boundary(lines[index]):
+            end_index = index
+            break
+
+    table_lines = lines[start_index:end_index]
+    row_infos: dict[int, dict[str, Any]] = {}
+    for index, line in enumerate(table_lines):
+        if is_table_noise_line(line):
+            continue
+        item = parse_layout_item_row(line)
+        if item:
+            row_infos[index] = item
+
+    if not row_infos:
+        return []
+
+    items: list[dict[str, Any]] = []
+    previous_after_row = 0
+    row_indices = sorted(row_infos)
+    for position, row_index in enumerate(row_indices):
+        gap_lines = normalize_description_lines(table_lines[previous_after_row:row_index])
+        prefix_lines: list[str] = []
+        if items and gap_lines:
+            if len(gap_lines) >= 2:
+                previous_item = items[-1]
+                apply_item_description(previous_item, [], gap_lines[:-1])
+                prefix_lines = [gap_lines[-1]]
+            elif row_infos[row_index].get("description"):
+                previous_item = items[-1]
+                apply_item_description(previous_item, [], gap_lines)
+            else:
+                prefix_lines = gap_lines
+        else:
+            prefix_lines = gap_lines
+
+        item = apply_item_description(row_infos[row_index], prefix_lines)
+        items.append(item)
+        previous_after_row = row_index + 1
+
+        if position == len(row_indices) - 1:
+            trailing_lines = normalize_description_lines(table_lines[previous_after_row:end_index])
+            if trailing_lines:
+                apply_item_description(items[-1], [], trailing_lines)
+
+    return [normalize_item(item) for item in items]
+
+
 def parse_invoice_items_from_text(text: str) -> list[dict[str, Any]]:
     lines = normalized_text_lines(text)
+    layout_items = parse_invoice_items_from_layout_lines(lines)
+    if layout_items:
+        return layout_items
+
     start_index = None
     end_index = len(lines)
 
@@ -1258,110 +1857,324 @@ def parse_invoice_items_from_text(text: str) -> list[dict[str, Any]]:
     return items
 
 
+def extract_invoice_date_from_text(text: str) -> str | None:
+    text = plain_layout_text(text)
+    match = re.search(
+        r"Ngày\s*(?:\([^)]*(?:Date|Day)[^)]*\))?\s*(\d{1,2})\s*"
+        r"tháng\s*(?:\([^)]*Month[^)]*\))?\s*(\d{1,2})\s*"
+        r"năm\s*(?:\([^)]*Year[^)]*\))?\s*(\d{4})",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    day, month, year = match.groups()
+    return f"{year}-{int(month):02d}-{int(day):02d}"
+
+
+def extract_tax_authority_code(lines: list[str]) -> str | None:
+    value = extract_labeled_value(
+        lines,
+        r"Mã\s*(?:của\s*cơ\s*quan\s*thuế|CQT|CQ\s*thuế)\s*(?:\([^)]*\))?"
+        r"|MCQT\s*cấp|MCCQT\s*(?:\([^)]*\))?",
+        multiline=True,
+        max_following_lines=1,
+    )
+    if not value:
+        return None
+    match = re.search(r"\b[A-Z0-9]{10,}\b", value, re.IGNORECASE)
+    return match.group(0).upper() if match else clean_text_value(value)
+
+
+def parse_buyer_from_lines(lines: list[str]) -> dict[str, Any]:
+    buyer = blank_invoice_json()["buyer"]
+    table_start = find_table_start_index(lines) or len(lines)
+    buyer_start = find_line_index(
+        lines,
+        r"hovatennguoimuahang",
+        r"hotennguoimuahang",
+        r"nguoimuahang",
+        r"customer",
+        r"agent",
+        start=0,
+        end=table_start,
+    )
+    if buyer_start is None:
+        return buyer
+
+    person_name = extract_labeled_value(
+        lines,
+        r"(?:Họ\s*(?:và\s*)?tên\s*người\s*mua\s*hàng|Người\s*mua\s*hàng)\s*"
+        r"(?:\([^)]*\))?|Customer(?:'s)?\s*name|Agent",
+        start=buyer_start,
+        end=table_start,
+    )
+    company_name = extract_labeled_value(
+        lines,
+        r"Tên\s*đơn\s*vị\s*(?:\([^)]*\))?|Company(?:'s)?\s*name",
+        start=buyer_start,
+        end=table_start,
+        multiline=True,
+        max_following_lines=1,
+    )
+    if company_name:
+        buyer["company_name"] = company_name
+        buyer["name"] = person_name if person_name and not looks_like_company_name(person_name) else None
+    elif person_name and looks_like_company_name(person_name):
+        buyer["company_name"] = person_name
+    else:
+        buyer["name"] = person_name
+
+    buyer["tax_code"] = normalize_tax_code(
+        extract_labeled_value(
+            lines,
+            r"Mã\s*số\s*thuế\s*(?:\([^)]*\))?|MST|Tax\s*code|VAT\s*code",
+            start=buyer_start,
+            end=table_start,
+        )
+    )
+    buyer["address"] = extract_labeled_value(
+        lines,
+        r"Địa\s*chỉ\s*(?:\([^)]*\))?|Address",
+        start=buyer_start,
+        end=table_start,
+        multiline=True,
+        max_following_lines=3,
+    )
+    buyer["account_number"] = extract_labeled_value(
+        lines,
+        r"Số\s*tài\s*khoản\s*(?:\([^)]*\))?|Bank\s*A/C|A/C\s*No\.?|Account\s*No\.?",
+        start=buyer_start,
+        end=table_start,
+    )
+    buyer["id_card"] = extract_labeled_value(
+        lines,
+        r"CCCD\s*(?:\([^)]*\))?|ID\s*Card|Số\s*định\s*danh\s*cá\s*nhân",
+        start=buyer_start,
+        end=table_start,
+    )
+    buyer["budgetary_unit_code"] = extract_labeled_value(
+        lines,
+        r"Mã\s*ĐVQHNS\s*(?:\([^)]*\))?|Budgetary\s*Unit\s*Code|Mã\s*quan\s*hệ\s*ngân\s*sách",
+        start=buyer_start,
+        end=table_start,
+    )
+    buyer["passport_number"] = extract_labeled_value(
+        lines,
+        r"Số\s*hộ\s*chiếu\s*(?:\([^)]*\))?|PP\s*Number|Passport",
+        start=buyer_start,
+        end=table_start,
+    )
+    return buyer
+
+
+def numbers_from_total_line(lines: list[str], matcher: Any, pick: str = "first") -> Any:
+    for line in lines:
+        if is_table_header_line(line) or is_table_header_guide_line(line):
+            continue
+        if not matcher(line):
+            continue
+        tokens = extract_numeric_tokens(line)
+        if not tokens:
+            continue
+        token = tokens[-1] if pick == "last" else tokens[0]
+        return parse_vn_number(token)
+    return None
+
+
+def percent_from_total_line(lines: list[str], matcher: Any) -> Any:
+    for line in lines:
+        if not matcher(line):
+            continue
+        percent_tokens = [
+            token
+            for token in extract_numeric_tokens(line, include_percent=True)
+            if "%" in token
+        ]
+        if percent_tokens:
+            return parse_vn_percent(percent_tokens[0])
+        if "%" in line:
+            number_tokens = extract_numeric_tokens(line)
+            if number_tokens:
+                return parse_vn_percent(number_tokens[0])
+    return None
+
+
+def parse_totals_from_lines(lines: list[str]) -> dict[str, Any]:
+    totals = blank_invoice_json()["totals"]
+
+    def is_subtotal_line(line: str) -> bool:
+        compact = compact_match_text(line)
+        return bool(
+            (
+                re.search(r"congtien(?:hang|hanghoa|dichvu)|subtotal|totalamount", compact)
+                or compact.startswith("tongcong")
+            )
+            and "thanhtoan" not in compact
+            and "vatamount" not in compact
+            and "tienthue" not in compact
+        )
+
+    def is_total_payment_line(line: str) -> bool:
+        compact = compact_match_text(line)
+        return bool(
+            re.search(
+                r"tongcongtien(?:thanh)?toan|tongtien(?:thanh)?toan|"
+                r"tongthanhtoan|totalpayment|total$",
+                compact,
+            )
+        )
+
+    def is_vat_rate_line(line: str) -> bool:
+        return line_matches_compact(line, r"thue?su?a?tgtgt", r"vatrate")
+
+    def is_vat_amount_line(line: str) -> bool:
+        return line_matches_compact(line, r"ti?e?nthue?gtgt", r"vatamount", r"v?at$")
+
+    subtotal_tokens: list[str] = []
+    for line in lines:
+        if is_table_header_line(line) or is_table_header_guide_line(line):
+            continue
+        if is_subtotal_line(line):
+            subtotal_tokens = extract_numeric_tokens(line)
+            if subtotal_tokens:
+                totals["subtotal"] = parse_vn_number(subtotal_tokens[0])
+                break
+    totals["vat_rate"] = percent_from_total_line(lines, is_vat_rate_line)
+    totals["vat_amount"] = numbers_from_total_line(lines, is_vat_amount_line, pick="last")
+    totals["total_payment"] = numbers_from_total_line(lines, is_total_payment_line, pick="last")
+
+    if len(subtotal_tokens) >= 3:
+        if totals["vat_amount"] is None:
+            totals["vat_amount"] = parse_vn_number(subtotal_tokens[-2])
+        if totals["total_payment"] is None:
+            totals["total_payment"] = parse_vn_number(subtotal_tokens[-1])
+
+    if totals["total_payment"] is None and totals["subtotal"] is not None:
+        vat_amount = totals["vat_amount"] or 0
+        totals["total_payment"] = totals["subtotal"] + vat_amount
+
+    for line in lines:
+        compact = compact_match_text(line)
+        if not re.search(r"sotien(?:viet)?bangchu|amountinwords|inwords", compact):
+            continue
+        value = re.sub(
+            r"^.*?(?:Số\s*tiền(?:\s*viết)?\s*bằng\s*chữ|Amount\s*in\s*words|in\s*words)"
+            r"\s*(?:\([^)]*\))?\s*:?",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(r"^\s*\)?\s*:?\s*", "", value)
+        value = re.sub(r"^\s*\|+\s*", "", value)
+        value = re.sub(r"\s+:\s+", " ", value)
+        totals["amount_in_words"] = clean_text_value(value)
+        if totals["amount_in_words"]:
+            break
+
+    return totals
+
+
+def extract_invoice_number_from_lines(lines: list[str], end: int | None = None) -> str | None:
+    end = len(lines) if end is None else min(end, len(lines))
+    label_pattern = (
+        r"Số\s*(?!tài\s*khoản|điện\s*thoại|định\s*danh|hộ\s*chiếu|tiền)"
+        r"(?:\([^)]*(?:Invoice\s*No\.?|Invoice\s*Number|No\.?|Number)[^)]*\))?"
+        r"|Invoice\s*No\.?|Invoice\s*Number"
+    )
+    for line in lines[:end]:
+        for cell_index, cell in enumerate(split_layout_cells(line) or [line]):
+            compact = compact_match_text(cell)
+            if (
+                "maso" in compact
+                or compact.startswith("mauso")
+                or "formno" in compact
+                or "taxcode" in compact
+                or "vatcode" in compact
+                or compact.startswith(("sotaikhoan", "sodienthoai", "sodinhdanh", "sohochieu"))
+            ):
+                continue
+            if not (
+                compact == "so"
+                or compact.startswith(("sono", "soinvoice", "invoiceno", "invoicenumber"))
+                or re.search(r"^so\d", compact)
+            ):
+                continue
+            value = value_after_label_in_cell(cell, label_pattern)
+            if not value:
+                cells = split_layout_cells(line)
+                if cell_index + 1 < len(cells) and not is_known_label_cell(cells[cell_index + 1]):
+                    value = cells[cell_index + 1]
+            value = clean_labeled_value(value)
+            if value and re.search(r"\d", value):
+                match = re.search(r"\b[A-Z0-9][A-Z0-9./-]*\b", value, re.IGNORECASE)
+                return match.group(0) if match else value
+    return None
+
+
+def extract_invoice_series_from_lines(lines: list[str], end: int | None = None) -> str | None:
+    end = len(lines) if end is None else min(end, len(lines))
+    label_pattern = r"Ký\s*hiệu\s*(?:\([^)]*(?:Series|Serial)[^)]*\))?|Serial"
+    for line in lines[:end]:
+        for cell_index, cell in enumerate(split_layout_cells(line) or [line]):
+            if not re.search(label_pattern, cell, re.IGNORECASE):
+                continue
+            value = value_after_label_in_cell(cell, label_pattern)
+            if not value:
+                cells = split_layout_cells(line)
+                if cell_index + 1 < len(cells) and not is_known_label_cell(cells[cell_index + 1]):
+                    value = cells[cell_index + 1]
+            value = clean_labeled_value(value)
+            if value:
+                match = re.search(r"\b[A-Z0-9][A-Z0-9./-]*\b", value, re.IGNORECASE)
+                return match.group(0) if match else value
+    return None
+
+
 def parse_invoice_text_layer(text: str) -> dict[str, Any]:
     data = blank_invoice_json()
     if not clean_text_value(text):
         return data
     lines = normalized_text_lines(text)
+    table_start = find_table_start_index(lines) or len(lines)
+    plain_text = "\n".join(plain_layout_text(line) for line in lines)
+    compact_text = compact_match_text(plain_text)
 
     data["invoice"]["invoice_type"] = (
         "VAT_INVOICE"
-        if re.search(
-            r"H[ÓO]A ĐƠN GI[ÁA] TRỊ GIA TĂNG|VAT INVOICE",
-            text,
-            re.IGNORECASE,
+        if (
+            "hoadongiatrigiatang" in compact_text
+            or "vatinvoice" in compact_text
+            or ("hoadon" in compact_text and "giatrigiatang" in compact_text)
         )
         else None
     )
-    data["invoice"]["invoice_number"] = regex_value(r"Số \(No\.?\):\s*([^\n]+)", text)
-    data["invoice"]["series"] = regex_value(
-        r"Ký hiệu \((?:Series|Serial)\):\s*([^\n]+)",
-        text,
+    data["invoice"]["invoice_number"] = extract_invoice_number_from_lines(
+        lines, end=table_start
     )
-    day = regex_value(r"Ngày \(Date\)\s*(\d{1,2})", text)
-    month = regex_value(r"Tháng \(Month\)\s*(\d{1,2})", text)
-    year = regex_value(r"Năm \(Year\)\s*(\d{4})", text)
-    if day and month and year:
-        data["invoice"]["invoice_date"] = f"{year}-{int(month):02d}-{int(day):02d}"
-    data["invoice"]["tax_authority_code"] = (
-        regex_value(
-            r"Mã của cơ quan thuế \(Tax authority code\):\s*([A-Z0-9]{10,})",
-            text,
-            flags=re.IGNORECASE,
-        )
-        or regex_value(r"Mã CQT:\s*([A-Z0-9]{10,})", text, flags=re.IGNORECASE)
+    data["invoice"]["series"] = extract_invoice_series_from_lines(lines, end=table_start)
+    data["invoice"]["invoice_date"] = extract_invoice_date_from_text(plain_text)
+    data["invoice"]["tax_authority_code"] = extract_tax_authority_code(lines)
+    data["invoice"]["currency"] = extract_labeled_value(
+        lines,
+        r"Đơn\s*vị\s*tiền\s*tệ\s*(?:\([^)]*\))?|Currency",
+        end=table_start,
     )
-    data["invoice"]["currency"] = regex_value(
-        r"Đơn vị tiền tệ \(Currency\):\s*([^\n]+)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    data["invoice"]["payment_method"] = regex_value(
-        r"Hình thức thanh toán \((?:Method payment|Payment method)\):\s*([^\n]+)",
-        text,
-        flags=re.IGNORECASE,
+    data["invoice"]["payment_method"] = extract_labeled_value(
+        lines,
+        r"Hình\s*thức\s*thanh\s*toán\s*(?:\([^)]*\))?|Payment\s*method|Mode\s*of\s*payment",
+        end=table_start,
     )
 
     merge_known_fields(data["seller"], parse_seller_from_text(text))
+    merge_known_fields(data["buyer"], parse_buyer_from_lines(lines))
 
-    data["buyer"]["name"] = regex_value(
-        r"Họ tên người mua hàng \(Buyer's name\):[ \t]*([^\n]*)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    data["buyer"]["company_name"] = regex_value(
-        r"Tên đơn vị \(Company's name\):\s*(.*?)\n\s*Mã số thuế",
-        text,
-    )
-    data["buyer"]["tax_code"] = normalize_tax_code(
-        regex_value(
-            r"Tên đơn vị \(Company's name\):.*?\n\s*Mã số thuế \(Tax code\):\s*([^\n]+)",
-            text,
-        )
-    )
-    data["buyer"]["address"] = regex_value(
-        r"Tên đơn vị \(Company's name\):.*?\n\s*Mã số thuế \(Tax code\):.*?\n\s*"
-        r"Địa chỉ\s*:?\s*\(Address\):\s*(.*?)\n\s*"
-        r"(?:Tỷ giá|Hình thức thanh toán|Số tài khoản|Tên tàu|Kho xuất hàng|Mã ĐVQHNS|Số hộ chiếu)",
-        text,
-    )
-    data["buyer"]["id_card"] = regex_value(
-        r"CCCD \(ID Card\):[ \t]*([^\n]*)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    data["buyer"]["account_number"] = regex_value(
-        r"Số tài khoản \((?:Account number|A/C No\.)\):[^\S\r\n]*([^\n]*)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    data["buyer"]["budgetary_unit_code"] = regex_value(
-        r"Mã ĐVQHNS \(Budgetary Unit Code\):[ \t]*([^\n]*)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    data["buyer"]["passport_number"] = regex_value(
-        r"Số hộ chiếu \(PP Number\):[ \t]*([^\n]*)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    data["shipping"]["ship_from_warehouse"] = regex_value(
-        r"Kho xuất hàng \(Ship-from warehouse\):\s*(.*?)\n\s*Mã ĐVQHNS",
-        text,
+    data["shipping"]["ship_from_warehouse"] = extract_labeled_value(
+        lines,
+        r"Kho\s*xuất\s*hàng\s*(?:\([^)]*\))?|Ship-from\s*warehouse",
     )
     data["items"] = parse_invoice_items_from_text(text)
-    data["totals"]["subtotal"] = parse_vn_number(
-        regex_value(r"Cộng tiền hàng \(Total amount\):\s*([^\n]+)", text)
-    )
-    data["totals"]["vat_rate"] = parse_vn_percent(
-        regex_value(r"Thuế suất GTGT \(VAT rate\):\s*([^\n]+)", text)
-    )
-    data["totals"]["vat_amount"] = parse_vn_number(
-        regex_value(r"Tiền thuế GTGT \(VAT amount\):\s*([^\n]+)", text)
-    )
-    data["totals"]["total_payment"] = parse_vn_number(
-        regex_value(r"Tổng cộng tiền thanh toán \(Total payment\):\s*([^\n]+)", text)
-    )
+    merge_known_fields(data["totals"], parse_totals_from_lines(lines))
     summary_amounts = numeric_cells_after_label(
         lines,
         r"^(?:Tổng cộng|Cộng tiền hàng).*Total amount",
@@ -1382,22 +2195,33 @@ def parse_invoice_text_layer(text: str) -> dict[str, Any]:
         ]
         if len(set(item_vat_rates)) == 1:
             data["totals"]["vat_rate"] = item_vat_rates[0]
-    data["totals"]["amount_in_words"] = regex_value(
-        r"Số tiền viết bằng chữ \(Amount in words\):\s*([^\n]+)",
-        text,
-    )
     data["signature"]["is_valid"] = (
         True if re.search(r"Signature Valid", text, re.IGNORECASE) else None
     )
-    data["signature"]["signed_by"] = (
-        regex_value(r"Ký bởi:\s*(.*?)(?:\n\s*(?:Ngày ký|Ký ngày):)", text)
-        or regex_value(r"Ký bởi:\s*([^\n]+)", text)
-    )
-    data["signature"]["signed_date"] = regex_value(
-        r"(?:Ngày ký|Ký ngày):\s*([^\n]*)",
-        text,
-        flags=re.IGNORECASE,
-    )
+    for index, line in enumerate(lines):
+        if not re.search(r"(?:Được\s*)?Ký\s*bởi|Signed\s*by", line, re.IGNORECASE):
+            continue
+        signed_by = extract_labeled_value(
+            lines,
+            r"(?:Được\s*)?Ký\s*bởi|Signed\s*by",
+            start=index,
+            end=min(len(lines), index + 3),
+            multiline=True,
+            max_following_lines=2,
+        )
+        if signed_by:
+            data["signature"]["signed_by"] = signed_by
+    for index, line in enumerate(lines):
+        if not re.search(r"Ngày\s*ký|Ký\s*ngày|Signed\s*date", line, re.IGNORECASE):
+            continue
+        signed_date = extract_labeled_value(
+            lines,
+            r"Ngày\s*ký|Ký\s*ngày|Signed\s*date",
+            start=index,
+            end=min(len(lines), index + 2),
+        )
+        if signed_date:
+            data["signature"]["signed_date"] = signed_date
     data["metadata"]["pdf_text_layer_used"] = True
 
     return normalize_invoice_data(data)
@@ -1463,6 +2287,72 @@ def overlay_invoice_data(base: Any, overlay: Any) -> dict[str, Any]:
     return base
 
 
+def merge_invoice_page_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = blank_invoice_json()
+    merged["metadata"]["page_count"] = len(results)
+    merged["metadata"]["ocr_processed"] = True
+
+    items: list[dict[str, Any]] = []
+    for result in results:
+        page_data = normalize_invoice_data(result.get("data", {}))
+        if not isinstance(page_data, dict) or "parse_error" in page_data:
+            continue
+
+        for section in ["invoice", "seller", "buyer", "shipping", "signature"]:
+            source_section = page_data.get(section, {})
+            if not isinstance(source_section, dict):
+                continue
+            for key, value in source_section.items():
+                if has_meaningful_value(value) and not has_meaningful_value(
+                    merged[section].get(key)
+                ):
+                    merged[section][key] = value
+
+        source_totals = page_data.get("totals", {})
+        if isinstance(source_totals, dict):
+            for key, value in source_totals.items():
+                if has_meaningful_value(value):
+                    merged["totals"][key] = value
+
+        if isinstance(page_data.get("items"), list):
+            items.extend(
+                normalize_item(item)
+                for item in page_data["items"]
+                if isinstance(item, dict)
+            )
+
+        source_metadata = page_data.get("metadata", {})
+        if isinstance(source_metadata, dict):
+            bool_metadata_keys = {
+                "pdf_text_layer_used",
+                "vision_model_used",
+                "text_layer_shortcut_used",
+                "text_layer_overlay_used",
+                "blank_page_skipped",
+            }
+            for key in [
+                "source_type",
+                "pdf_text_layer_used",
+                "vision_model_used",
+                "pdf_text_strategy",
+                "text_layer_shortcut_used",
+                "text_layer_overlay_used",
+                "blank_page_skipped",
+            ]:
+                value = source_metadata.get(key)
+                if key in bool_metadata_keys:
+                    merged["metadata"][key] = bool(merged["metadata"].get(key)) or bool(
+                        value
+                    )
+                elif has_meaningful_value(value) and not has_meaningful_value(
+                    merged["metadata"].get(key)
+                ):
+                    merged["metadata"][key] = value
+
+    merged["items"] = items
+    return normalize_invoice_data(merged)
+
+
 def scan_invoice_file(
     input_path: str | Path,
     output_image_dir: str | Path | None = None,
@@ -1480,7 +2370,11 @@ def scan_invoice_file(
     )
 
     pdf_text_pages: list[str] = []
-    if config.use_pdf_text_layer and is_pdf:
+    pdf_text_strategy = normalize_pdf_text_strategy(config.pdf_text_strategy)
+    should_read_pdf_text = (
+        config.use_pdf_text_layer and is_pdf and pdf_text_strategy != "off"
+    )
+    if should_read_pdf_text:
         pdf_text_pages = extract_pdf_text_pages(input_path)
 
     results: list[dict[str, Any]] = []
@@ -1492,14 +2386,25 @@ def scan_invoice_file(
         ):
             text_layer_data = parse_invoice_text_layer(pdf_text_pages[page_index - 1])
 
-        if text_layer_data and is_text_layer_data_sufficient(text_layer_data):
+        text_layer_shortcut_used = False
+        text_layer_overlay_used = False
+        if (
+            pdf_text_strategy == "fast"
+            and text_layer_data
+            and is_text_layer_data_sufficient(text_layer_data)
+        ):
             page_data = text_layer_data
+            vision_model_used = False
+            text_layer_shortcut_used = True
+        elif is_pdf and not text_layer_data and is_probably_blank_image(image):
+            page_data = blank_invoice_json()
             vision_model_used = False
         else:
             raw_response = run_vintern_server(image=image, config=config)
             page_data = normalize_invoice_data(parse_model_json(raw_response))
             if text_layer_data:
                 page_data = overlay_invoice_data(page_data, text_layer_data)
+                text_layer_overlay_used = True
             vision_model_used = True
 
         if not isinstance(page_data.get("metadata"), dict):
@@ -1509,9 +2414,15 @@ def scan_invoice_file(
                 "source_type": source_type,
                 "page_count": len(images),
                 "ocr_processed": True,
+                "pdf_text_layer_used": bool(text_layer_data),
                 "vision_model_used": vision_model_used,
+                "pdf_text_strategy": pdf_text_strategy,
+                "text_layer_shortcut_used": text_layer_shortcut_used,
+                "text_layer_overlay_used": text_layer_overlay_used,
             }
         )
+        if is_pdf and not text_layer_data and not vision_model_used:
+            page_data["metadata"]["blank_page_skipped"] = True
 
         page_image_path = image_paths[page_index - 1]
         if page_image_path:

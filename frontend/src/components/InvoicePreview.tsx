@@ -4,6 +4,7 @@ interface InvoicePreviewProps {
   data: InvoiceData;
   pageNumber: number;
   pageCount: number;
+  pageLabel?: string;
 }
 
 const empty = "-";
@@ -42,7 +43,7 @@ function formatPercent(value: number | null | undefined): string {
   return `${formatNumber(value)}%`;
 }
 
-export default function InvoicePreview({ data, pageNumber, pageCount }: InvoicePreviewProps) {
+export default function InvoicePreview({ data, pageNumber, pageCount, pageLabel }: InvoicePreviewProps) {
   const invoiceNumber = data.invoice?.invoice_number || "Chưa xác định";
   const total = data.totals?.total_payment;
   const items = data.items || [];
@@ -57,7 +58,7 @@ export default function InvoicePreview({ data, pageNumber, pageCount }: InvoiceP
           </h2>
           {pageCount > 1 && (
             <p className="mt-2 font-mono text-sm text-muted">
-              Trang {pageNumber}/{pageCount}
+              {pageLabel || `Trang ${pageNumber}/${pageCount}`}
             </p>
           )}
         </div>

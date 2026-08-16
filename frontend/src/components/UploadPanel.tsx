@@ -1,9 +1,8 @@
 import {
   Archive,
-  FileText,
+  FileImage,
   Loader2,
   Search,
-  Upload,
   Zap,
 } from "lucide-react";
 import { useRef, useState } from "react";
@@ -15,9 +14,28 @@ interface UploadPanelProps {
 }
 
 const MAX_SIZE_MB = 20;
+const ACCEPTED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif"];
+const ACCEPTED_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/tiff",
+  "image/bmp",
+  "image/gif",
+]);
+const ACCEPT_ATTRIBUTE = [
+  "application/pdf",
+  "image/*",
+  ...ACCEPTED_EXTENSIONS,
+].join(",");
 
-function isPdf(file: File) {
-  return file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf";
+function hasAcceptedType(file: File) {
+  const fileName = file.name.toLowerCase();
+  return (
+    ACCEPTED_EXTENSIONS.some((extension) => fileName.endsWith(extension)) ||
+    ACCEPTED_MIME_TYPES.has(file.type)
+  );
 }
 
 export default function UploadPanel({
@@ -33,8 +51,8 @@ export default function UploadPanel({
     if (!file) {
       return;
     }
-    if (!isPdf(file)) {
-      setLocalError("Chỉ hỗ trợ file PDF.");
+    if (!hasAcceptedType(file)) {
+      setLocalError("Chỉ hỗ trợ PDF hoặc ảnh hóa đơn.");
       return;
     }
     if (file.size > MAX_SIZE_MB * 1024 * 1024) {
@@ -69,21 +87,21 @@ export default function UploadPanel({
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf,.pdf"
+          accept={ACCEPT_ATTRIBUTE}
           className="sr-only"
           onChange={(event) => acceptFile(event.target.files?.[0])}
         />
 
         <div className="flex flex-col items-center px-6 text-center">
           <div className="relative mb-8 grid h-[86px] w-[72px] place-items-center rounded-md border border-[#aaa7a1] bg-white">
-            <FileText size={42} className="text-[#918d86]" strokeWidth={1.5} />
+            <FileImage size={42} className="text-[#918d86]" strokeWidth={1.5} />
             <span className="absolute -right-1 top-0 rounded-sm bg-[#dc2028] px-2 py-1 font-mono text-[10px] font-bold text-white">
-              PDF
+              OCR
             </span>
           </div>
 
           <p className="text-[22px] font-semibold leading-8">
-            {loading ? "Đang trích xuất dữ liệu..." : "Kéo thả file PDF hoặc "}
+            {loading ? "Đang trích xuất dữ liệu..." : "Kéo thả PDF hoặc ảnh hóa đơn "}
             {!loading && (
               <button
                 type="button"
@@ -94,7 +112,9 @@ export default function UploadPanel({
               </button>
             )}
           </p>
-          <p className="mt-2 text-[17px] text-muted">Chỉ hỗ trợ định dạng .pdf - tối đa 20 MB</p>
+          <p className="mt-2 text-[17px] text-muted">
+            Hỗ trợ .pdf, .png, .jpg, .webp, .tif, .bmp, .gif - tối đa 20 MB
+          </p>
 
           {loading && (
             <div className="mt-8 w-full max-w-[360px]">

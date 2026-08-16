@@ -5,7 +5,7 @@ export default function PageIntro() {
         Trích xuất dữ liệu hóa đơn
       </h1>
       <p className="mt-4 max-w-[620px] text-[18px] leading-8 text-muted">
-        Tải lên file PDF hóa đơn - hệ thống sẽ nhận diện OCR và trả về dữ liệu có
+        Tải lên PDF hoặc ảnh hóa đơn - hệ thống sẽ nhận diện OCR và trả về dữ liệu có
         cấu trúc dạng JSON.
       </p>
     </section>
