@@ -44,66 +44,138 @@
         {
           "line_number": 1,
           "description": "Thép hộp mạ kẽm 1.400 30*60*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.400 30*60*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 522,
           "unit_price": 17336.364,
-          "amount": 9049582
+          "amount": 9049582,
+          "taxable_amount": 9049582,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         },
         {
           "line_number": 2,
           "description": "Thép hộp mạ kẽm 1.400 40*80*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.400 40*80*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 1407,
           "unit_price": 17336.3639,
-          "amount": 24392264
+          "amount": 24392264,
+          "taxable_amount": 24392264,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         },
         {
           "line_number": 3,
           "description": "Thép hộp mạ kẽm 1.400 50*100*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.400 50*100*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 715,
           "unit_price": 17336.3636,
-          "amount": 12395500
+          "amount": 12395500,
+          "taxable_amount": 12395500,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         },
         {
           "line_number": 4,
           "description": "Thép hộp mạ kẽm 1.800 50*100*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.800 50*100*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 924,
           "unit_price": 17336.3636,
-          "amount": 16018800
+          "amount": 16018800,
+          "taxable_amount": 16018800,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         },
         {
           "line_number": 5,
           "description": "Thép hộp mạ kẽm 1.400 20*40*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.400 20*40*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 671,
           "unit_price": 17336.3636,
-          "amount": 11632700
+          "amount": 11632700,
+          "taxable_amount": 11632700,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         },
         {
           "line_number": 6,
           "description": "Thép hộp mạ kẽm 1.800 30*60*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.800 30*60*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 671,
           "unit_price": 17336.3636,
-          "amount": 11632700
+          "amount": 11632700,
+          "taxable_amount": 11632700,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         },
         {
           "line_number": 7,
           "description": "Thép hộp mạ kẽm 1.400 30*30*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.400 30*30*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 695,
           "unit_price": 17336.364,
-          "amount": 12048773
+          "amount": 12048773,
+          "taxable_amount": 12048773,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         },
         {
           "line_number": 8,
           "description": "Thép hộp mạ kẽm 1.200 20*20*6000",
+          "description_lines": [
+            "Thép hộp mạ kẽm 1.200 20*20*6000"
+          ],
+          "item_type": "GOODS",
+          "container_number": null,
           "unit": "Kg",
           "quantity": 373,
           "unit_price": 17336.3646,
-          "amount": 6466464
+          "amount": 6466464,
+          "taxable_amount": 6466464,
+          "vat_rate": null,
+          "vat_amount": null,
+          "total_amount": null
         }
       ],
       "totals": {
@@ -116,7 +188,7 @@
       "signature": {
         "is_valid": true,
         "signed_by": "CÔNG TY CỔ PHẦN TÔN ĐÔNG Á",
-        "signed_date": null
+        "signed_date": "(Cần kiểm tra, đối chiếu khi giao và nhận hóa đơn)"
       },
       "metadata": {
         "source_type": "PDF",

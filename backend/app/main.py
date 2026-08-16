@@ -16,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from .pipeline import (
     OCRPipelineError,
     estimate_quality_score,
+    merge_invoice_page_results,
     ocr_config_from_env,
     probe_server,
     scan_invoice_file,
@@ -31,7 +32,17 @@ FRONTEND_DIST = Path(
     os.getenv("FRONTEND_DIST", str(BACKEND_ROOT.parent / "frontend" / "dist"))
 ).resolve()
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
-ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
+ALLOWED_SUFFIXES = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".gif",
+}
 
 
 def parse_cors_origins() -> list[str]:
@@ -110,7 +121,10 @@ async def extract_invoice(file: UploadFile = File(...)) -> dict:
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(
             status_code=400,
-            detail="Chỉ hỗ trợ PDF hoặc ảnh hóa đơn (.pdf, .png, .jpg, .webp, .tif).",
+            detail=(
+                "Chỉ hỗ trợ PDF hoặc ảnh hóa đơn "
+                "(.pdf, .png, .jpg, .jpeg, .webp, .tif, .tiff, .bmp, .gif)."
+            ),
         )
 
     job_id = uuid4().hex
@@ -138,9 +152,9 @@ async def extract_invoice(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=500, detail=f"OCR thất bại: {error}") from error
 
     elapsed_seconds = round(time.perf_counter() - started_at, 2)
-    first_data = pages[0].get("data", {}) if pages else {}
-    source_type = first_data.get("metadata", {}).get("source_type") if pages else None
-    confidence = estimate_quality_score(pages)
+    merged_data = merge_invoice_page_results(pages) if pages else {}
+    source_type = merged_data.get("metadata", {}).get("source_type") if pages else None
+    confidence = estimate_quality_score([{"page": 1, "data": merged_data}])
 
     result_payload = {
         "job_id": job_id,
@@ -150,7 +164,7 @@ async def extract_invoice(file: UploadFile = File(...)) -> dict:
         "confidence": confidence,
         "elapsed_seconds": elapsed_seconds,
         "pages": pages,
-        "data": first_data,
+        "data": merged_data,
         "download_url": f"/api/invoices/{job_id}/download",
     }
 

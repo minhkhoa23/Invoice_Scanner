@@ -19,7 +19,7 @@ export default function AppShell({ children }: AppShellProps) {
             </span>
           </Link>
           <div className="font-mono text-sm font-semibold uppercase tracking-normal text-muted">
-            PDF <span className="px-1">→</span> JSON
+            PDF/Ảnh <span className="px-1">→</span> JSON
           </div>
         </div>
       </header>

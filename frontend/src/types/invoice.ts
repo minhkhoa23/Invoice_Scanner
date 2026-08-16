@@ -29,10 +29,17 @@ export interface PartyInfo {
 export interface InvoiceItem {
   line_number: Nullable<number>;
   description: Nullable<string>;
+  description_lines?: string[];
+  item_type?: Nullable<string>;
+  container_number?: Nullable<string>;
   unit: Nullable<string>;
   quantity: Nullable<number>;
   unit_price: Nullable<number>;
   amount: Nullable<number>;
+  taxable_amount?: Nullable<number>;
+  vat_rate?: Nullable<number>;
+  vat_amount?: Nullable<number>;
+  total_amount?: Nullable<number>;
 }
 
 export interface TotalsInfo {
