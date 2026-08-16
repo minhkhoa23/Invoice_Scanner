@@ -62,8 +62,11 @@ cd ..
 Giữ terminal này mở:
 
 ```powershell
-llama-server -hf rootonchair/Vintern-1B-v3_5-GGUF-ext:Q4_K_M --mmproj "D:\Invoice_Scanner\models\mmproj-Vintern-1B-v3_5-Q8_0.gguf" --chat-template vicuna --port 8081
+llama-server -hf rootonchair/Vintern-1B-v3_5-GGUF-ext:Q4_K_M --mmproj "D:\Invoice_Scanner\models\mmproj-Vintern-1B-v3_5-Q8_0.gguf" --chat-template vicuna --n-gpu-layers 0 --port 8081
 ```
+
+Nếu `llama-server` của bạn là bản có CUDA và máy có NVIDIA GPU, đổi
+`--n-gpu-layers 0` thành `--n-gpu-layers 999` để offload model lên GPU.
 
 ### Chạy backend
 
@@ -131,12 +134,16 @@ Mở terminal tại thư mục repo:
 
 ```powershell
 cd D:\Invoice_Scanner
-docker compose up --build
+.\scripts\docker-up.ps1
 ```
+
+Script này tự kiểm tra `nvidia-smi`. Nếu máy có NVIDIA GPU và Docker hỗ trợ GPU,
+nó sẽ dùng `docker-compose.gpu.yml`, CUDA image và `LLAMA_N_GPU_LAYERS=999`.
+Nếu không có GPU, nó tự chạy CPU như cũ.
 
 Lần đầu Docker sẽ:
 
-- Tải image `ghcr.io/ggml-org/llama.cpp:server`.
+- Tải image `ghcr.io/ggml-org/llama.cpp:server` hoặc CUDA image nếu bật GPU.
 - Build image web app.
 - Cài dependency Python/Node.
 - Build frontend React.
@@ -166,13 +173,45 @@ Invoke-RestMethod http://localhost:8081/health
 Nếu không đổi code:
 
 ```powershell
-docker compose up
+.\scripts\docker-up.ps1 -NoBuild
 ```
 
 Nếu có đổi code frontend/backend hoặc đổi dependency:
 
 ```powershell
-docker compose up --build
+.\scripts\docker-up.ps1
+```
+
+Chạy nền:
+
+```powershell
+.\scripts\docker-up.ps1 -Detached
+```
+
+Ép chạy CPU dù máy có GPU:
+
+```powershell
+.\scripts\docker-up.ps1 -Cpu
+```
+
+### Tăng tốc bằng GPU
+
+Docker GPU mode hiện hỗ trợ NVIDIA/CUDA. Máy cần:
+
+- NVIDIA driver đang hoạt động (`nvidia-smi` chạy được trong PowerShell).
+- Docker Desktop bật WSL2 backend và hỗ trợ GPU container.
+
+Cách chạy thủ công không dùng script:
+
+```powershell
+$env:LLAMA_N_GPU_LAYERS="999"
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+```
+
+Kiểm tra log xem model có offload lên GPU không:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml logs -f llama-server
 ```
 
 ### Chế độ OCR PDF
@@ -226,7 +265,7 @@ Nếu muốn xóa luôn dữ liệu và cache model:
 docker compose down -v
 ```
 
-### Tùy chỉnh image llama.cpp
+### Tùy chỉnh image llama.cpp/GPU
 
 Mặc định dùng CPU image:
 
@@ -234,24 +273,29 @@ Mặc định dùng CPU image:
 ghcr.io/ggml-org/llama.cpp:server
 ```
 
-Nếu muốn dùng image khác, ví dụ CUDA image, truyền `LLAMA_CPP_IMAGE` trước khi
-chạy Docker.
+Khi dùng `.\scripts\docker-up.ps1`, script sẽ tự đổi sang CUDA image nếu phát
+hiện NVIDIA GPU. Nếu muốn tự chọn image khác, truyền `LLAMA_CPP_IMAGE` trước khi
+chạy script:
 
 PowerShell:
 
 ```powershell
 $env:LLAMA_CPP_IMAGE="ghcr.io/ggml-org/llama.cpp:server-cuda"
-docker compose up --build
+$env:LLAMA_N_GPU_LAYERS="999"
+.\scripts\docker-up.ps1
 ```
 
-macOS/Linux:
+Hoặc chạy thủ công bằng compose override:
 
-```bash
-LLAMA_CPP_IMAGE="ghcr.io/ggml-org/llama.cpp:server-cuda" docker compose up --build
+```powershell
+$env:LLAMA_CPP_IMAGE="ghcr.io/ggml-org/llama.cpp:server-cuda"
+$env:LLAMA_N_GPU_LAYERS="999"
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 ```
 
-Lưu ý: CUDA cần Docker/NVIDIA runtime trên máy host. Nếu chưa cấu hình GPU cho
-Docker, hãy dùng image CPU mặc định.
+Lưu ý: CUDA cần Docker/NVIDIA runtime trên máy host. Nếu máy dùng AMD/Intel GPU
+hoặc Docker chưa thấy GPU, hãy dùng CPU mode hoặc cài image/runtime phù hợp rồi
+trỏ lại `LLAMA_CPP_IMAGE`.
 
 ### Dùng OCR server bên ngoài thay vì container
 

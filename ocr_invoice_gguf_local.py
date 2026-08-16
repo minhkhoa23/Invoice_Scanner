@@ -1,5 +1,5 @@
 """
-Local CPU invoice OCR pipeline using the quantized GGUF Vintern model.
+Local invoice OCR pipeline using the quantized GGUF Vintern model.
 
 Examples:
     python ocr_invoice_gguf_local.py --input "invoice.pdf" --output "invoice.json"
@@ -64,6 +64,16 @@ PDF_TEXT_STRATEGIES = {"assist", "fast", "off"}
 def normalize_pdf_text_strategy(value: str | None) -> str:
     strategy = (value or "assist").strip().lower()
     return strategy if strategy in PDF_TEXT_STRATEGIES else "assist"
+
+
+def int_from_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def require_pillow() -> tuple[Any, Any]:
@@ -257,13 +267,15 @@ def load_llm(
     filename: str | None = None,
     n_ctx: int = 8192,
     n_threads: int | None = None,
+    n_gpu_layers: int = 0,
     chat_format: str | None = "mtmd",
     verbose: bool = False,
 ) -> Any:
     """
     Load the GGUF model through llama-cpp-python.
 
-    n_gpu_layers=0 keeps inference on CPU for machines without a discrete GPU.
+    n_gpu_layers=0 keeps inference on CPU; use -1 or a large value to offload
+    all possible layers when llama-cpp-python was installed with GPU support.
     """
     try:
         from llama_cpp import Llama
@@ -280,7 +292,7 @@ def load_llm(
         "filename": model_filename,
         "n_ctx": n_ctx,
         "n_threads": n_threads or max(1, (os.cpu_count() or 4) - 1),
-        "n_gpu_layers": 0,
+        "n_gpu_layers": n_gpu_layers,
         "verbose": verbose,
     }
 
@@ -1150,6 +1162,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Context length.",
     )
     parser.add_argument(
+        "--n-gpu-layers",
+        type=int,
+        default=int_from_env("LLAMA_N_GPU_LAYERS", 0),
+        help=(
+            "Number of model layers to offload to GPU for backend='python'. "
+            "Use 999 or -1 to offload all possible layers with a GPU-enabled "
+            "llama-cpp-python build."
+        ),
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=2048,
@@ -1231,6 +1253,7 @@ def main() -> None:
             filename=args.filename,
             n_ctx=args.n_ctx,
             n_threads=args.threads,
+            n_gpu_layers=args.n_gpu_layers,
             chat_format=args.chat_format,
             verbose=args.verbose,
         )

@@ -250,10 +250,12 @@ def probe_server(server_url: str, timeout: int = 5) -> dict[str, Any]:
 
 
 def build_llama_server_command() -> str:
+    n_gpu_layers = os.getenv("LLAMA_N_GPU_LAYERS", "0")
     return (
         f'llama-server -hf {MODEL_REPO_ID}:{MODEL_QUANT} '
         f'--mmproj "{MMPROJ_PATH}" '
         "--chat-template vicuna "
+        f"--n-gpu-layers {n_gpu_layers} "
         "--port 8081"
     )
 
