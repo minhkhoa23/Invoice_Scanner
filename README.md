@@ -236,14 +236,14 @@ Ví dụ muốn benchmark chế độ chỉ dùng model:
 
 ```powershell
 $env:OCR_PDF_TEXT_STRATEGY="off"
-docker compose up --build
+.\scripts\docker-up.ps1
 ```
 
 Ví dụ muốn chạy nhanh với PDF điện tử:
 
 ```powershell
 $env:OCR_PDF_TEXT_STRATEGY="fast"
-docker compose up --build
+.\scripts\docker-up.ps1
 ```
 
 ### 3. Dừng app
@@ -304,7 +304,7 @@ Nếu muốn quay lại cách chạy `llama-server` bên ngoài Docker, truyền
 
 ```powershell
 $env:OCR_SERVER_URL="http://host.docker.internal:8081/v1"
-docker compose up --build
+.\scripts\docker-up.ps1
 ```
 
 ### Lỗi thường gặp
@@ -315,7 +315,7 @@ Nếu app mở được nhưng OCR chưa chạy:
 - Xem log model server:
 
 ```powershell
-docker compose logs -f llama-server
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml logs -f llama-server
 ```
 
 - Xem log web app:
